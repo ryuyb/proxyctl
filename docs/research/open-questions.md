@@ -255,53 +255,73 @@
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | **`RESOLVED`（2026-09-12 实测：入库不可绕过，备选③ 已否决）** |
-| 结论 | **必须入库。** `GET /download/:name` 在解析任何查询参数**之前**先查订阅是否存在，所以 `content=` / `url=` 都无法替代入库。备选③ **不可行**；备选① 与 ② 仍然有效。 |
-| 实测环境 | Debian aarch64 + 官方 release bundle `sub-store.bundle.js` **v2.39.6** + Node v24.20.0，后端绑 `127.0.0.1:13001` |
+| 状态 | **`RESOLVED`（2026-09-12 源码 + 实测；含一次纠正）** |
+| 结论 | **入库不可绕过**（`/download/:name` 先查库再解析参数），但**修改入库的语义是完整的**：`PATCH /api/sub/:name` 是真正的 upsert，`PUT /api/subs` 是全量替换。故备选② 的实现**不需要自己拼"先查再建"**。备选③ 仍否决。 |
+| 实测环境 | Debian aarch64 + 官方 bundle v2.39.6 + Node v24.20.0，后端绑 `127.0.0.1:13001` |
 
-### 决定性实测（四组，逐条对照）
+> ⚠️ **纠正记录**：本条最初只做了路由探测（试 `PATCH /api/subs/:name` → 404）就写下"无修改路由"。
+> 该结论**是错的**——真实路径是 **单数** `/api/sub/:name`。**路由探测不能替代读源码**：
+> 路径猜错会得到一个看起来确凿的 404，与"接口不存在"完全无法区分。
+
+### 真实的写入 API（源码 `backend/src/restful/subscriptions.js:35-45`）
+
+```js
+$app.get('/api/sub/flow/:name', getFlowInfo);
+
+$app.route('/api/sub/:name')          // 注意是单数 sub
+    .get(getSubscription)
+    .patch(updateSubscription)
+    .delete(deleteSubscription);
+
+$app.route('/api/subs')
+    .get(getAllSubscriptions)
+    .post(createSubscription)
+    .put(replaceSubscriptions);
+```
+
+### 逐条实测
 
 | # | 请求 | 结果 | 含义 |
 |---|---|---|---|
-| 1 | `/download/agenttmp`（订阅不存在） | **404** `Subscription agenttmp does not exist!` | 基线：路由先查库 |
-| 2 | 同上 **+ `content=<raw YAML>`** | **404**（同样的错误） | **`content=` 在查库之后才被考虑**，无法替代入库 |
-| 3 | 同上 + `content` + `url=` 同时给 | **404** | 两个参数都救不了不存在的订阅名 |
-| 4 | 先 `POST /api/subs` 建订阅，**再**带 `content=<raw YAML>` | **200**，返回内联内容 | `content=` 生效——但它覆盖的是**远端抓取**，不是**入库** |
+| 1 | `PATCH /api/sub/<name>`（存在） | **200**，返回合并后的对象 | **真 upsert 语义**：`{...oldSub, ...sub}` |
+| 2 | `PATCH /api/sub/<name>`（不存在） | **404** `RESOURCE_NOT_FOUND` | **不是** upsert——更新的前提仍是有这条记录 |
+| 3 | `PATCH /api/subs/<name>` | **404**（Express 默认 HTML） | 路径写错的对照（我最初就是错在这里） |
+| 4 | `PUT /api/subs` 全量数组 | **200**，`$.write(allSubs, SUBS_KEY)` | **全量替换**，天然幂等 |
+| 5 | 同一份再 `PUT` 一次 | **200**，count 仍为 1 | 确实幂等 |
+| 6 | `POST /api/subs` 同名 | **500** `DUPLICATE_KEY` | 新建路径不幂等 |
+| 7 | `name` 含 `/` | **500** `INVALID_NAME` | 源码 `if (/\//.test(sub.name))` |
 
-**机制**：`content=` 的作用是"别去远端拉，用我给的这段"，其前置条件仍是"这个名字得先在库里"。所以它解决的是**离线/内网源**问题，不是**副作用**问题。
+### 因此"幂等写入"有三种可选实现（按推荐排序）
 
-### 编码契约（回答 O5）
+| 方式 | 幂等性 | 代价 |
+|---|---|---|
+| **`PUT /api/subs` 全量替换** | **天然幂等**，一次调用 | 会**覆盖所有订阅**——多使用者共享一个 Sub-Store 时具有破坏性 |
+| **`PATCH /api/sub/:name` + 不存在时 `POST`** | 两步，需处理 404→POST | 组合逻辑；但引用关系（collections/artifacts/files）由服务端维护 |
+| `GET /api/subs` → 比较 → `POST`/`PATCH` | 同上 | 同中 |
+
+**关键收益**：`PATCH` 会**连带更新引用该订阅的 collections / artifacts / files**（源码 312-360 行）。这意味着 Agent 改 `url` 时**不必也不应**自己去改这些引用——服务端已经做了。
+
+### `content=` 的结论不变（回答 O5）
 
 | 形式 | 结果 |
 |---|---|
-| `content=<raw YAML>` | ✅ 生效 |
-| `content=<base64>` | ❌ **不解码**，报"订阅中不含有效节点" |
-| `content=data:text/plain;base64,<b64>` | ❌ 同样不解码 |
+| 订阅**不存在** + `content=<raw YAML>` | **404**（与不带时同样的错） |
+| 订阅**存在** + `content=<raw YAML>` | **200**，返回内联内容 |
+| `content=<base64>` / `data:text/plain;base64,…` | ❌ **不解码**，报"不含有效节点" |
 
-**`content=` 只接受 raw 文本，不做 base64 解码。** 故 O5 的答案是 **raw**。
-
-### 写入语义（影响备选②的实现）
-
-| 行为 | 实测 |
-|---|---|
-| `POST /api/subs` 新建 | **201**，无认证 |
-| 同名**再次** POST | **500** `DUPLICATE_KEY: Subscription <name> already exists.` |
-| `PATCH` / `PUT /api/subs/:name` | **无此路由**（Express 默认 404 HTML） |
-
-**所以"幂等写入"必须自己做**：先查（`GET /api/subs`）再决定 POST。**不能靠 PUT 覆盖**，同名 POST 会直接 500。这与 `SubscriptionRepository::save` 的幂等契约是两件事——后者是本地库，前者是外部服务。
-
-### 旁证：`url=` 覆盖仍然有效
-
-先建一个 URL **故意不可达**的订阅（`http://127.0.0.1:1/never`），下载时报"远端订阅错误"；但带 `url=http://127.0.0.1:13002/sub` 覆盖后 **200 且返回本地源的内容**。这印证 `04-sub-store.md` §1 第 4 条：**外部订阅源由 Agent 掌管，但订阅名必须先在库中存在**。
+`content=` 覆盖的是**远端抓取**，不是**注册**。编码契约是 **raw**。备选③ 否决。
 
 ### 对实现的约束
 
-1. Agent 必须写 Sub-Store 的库（备选②），或要求用户自建（备选①）。**没有第三条路**。
-2. 幂等性需自行实现（查 + 建），并处理 `DUPLICATE_KEY`。
-3. `content=` 仍有用：它让**离线或内网源**走通，且此时库中的 `url` 可以是个占位符。
-4. 库文件是 `sub-store.json`（`schemaVersion: "2.0"`），含 `subs/collections/artifacts/rules/files/tokens/...`。**Agent 不应直接改这个文件**——它属于 Sub-Store，直接写是在绕过对方的 schema 演进（见 O2）。
+1. Agent 必须写 Sub-Store 的库（备选②），或要求用户自建（备选①）。没有第三条路。
+2. **幂等优先用 `PUT /api/subs`（单实例专属场景）或 `PATCH` + 条件 `POST`（共享场景）**；不要重复 `POST`。
+3. 订阅名**不得含 `/`**（服务端硬校验）。
+4. **不要直接改 `sub-store.json`**：schema 属 Sub-Store（见 O2），且会绕过它对引用关系的维护。
+5. `DELETE /api/sub/:name` 存在，且会**同时清理 collections 中的引用**。
+6. 后端**无认证**且默认监听所有接口——绝不能暴露到非 loopback。
 
 | 关联 | ADR-002 D1/D4、`04-sub-store.md` §1/§3.1/§10 O2/O5 |
+| 证据 | 源码 `backend/src/restful/subscriptions.js`（`register()` 35-45、`updateSubscription` 296-368、`replaceSubscriptions` 381-393、`createSubscriptionItem` 395-420）；本机实测 7 组 |
 
 ## Q024 — `route_localnet` / `ip_forward` 等 sysctl 的写权限如何处理？
 
@@ -327,7 +347,7 @@
 
 | 状态 | 数量 | 条目 |
 |---|---|---|
-| `RESOLVED` | 13 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用）、**Q023**（2026-09-12：入库不可绕过，`content=` 只覆盖远端抓取） |
+| `RESOLVED` | 13 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用）、**Q023**（2026-09-12：入库不可绕过，但有 PATCH/PUT 修改接口；`content=` 只覆盖远端抓取） |
 | `PARTIAL` | 9 | Q001、Q004、Q011、Q017、Q018、Q019、Q021、Q022、Q025 |
 | `OPEN` | 4 | Q009、Q012、Q016、Q024 |
 

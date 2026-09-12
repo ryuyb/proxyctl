@@ -11,6 +11,12 @@
 
 1. **`/download/sub` 是误传接口** `[实测]`。请求 `/download/sub?target=mihomo&url=...` 返回 **404** `RESOURCE_NOT_FOUND: Subscription sub does not exist!`——`sub` 被解析为**订阅名**，而库中没有该订阅。设计文档 §12/§43 与 Phase 0 清单中"官方 Wiki 公开记录了 `/download/sub` 链接参数"的说法**与当前 v2.39.6 不符**，必须修正。
 2. **真实入口是 `/download/:name[/:target]`** `[上游源码]`：`src/restful/download.js:74,82`。另有 `/download/collection/:name`、`/share/sub/:name`、`/share/col/:name`。
+
+   **订阅的写入/修改 API 是完整的** `[上游源码 + 实测]`（`src/restful/subscriptions.js:35-45`）：
+   `/api/sub/:name`（**单数**）支持 `GET`/`PATCH`/`DELETE`；`/api/subs` 支持 `GET`/`POST`/`PUT`。
+   其中 `PATCH` 是 `{...oldSub, ...sub}` 的合并语义，且**连带更新引用该订阅的 collections/artifacts/files**；
+   `PUT` 是**全量替换**（天然幂等，但会覆盖所有订阅）。⚠️ 路径是单数 `sub`——写成 `/api/subs/:name` 会得到 404，
+   与"接口不存在"无法区分（见 Q023 的纠正记录）。
 3. **两段式模型** `[实测]`：先 `POST /api/subs`（**无任何认证**）把订阅写入数据库，再 `GET /download/:name?target=ClashMeta` 获取转换结果。**这意味着"订阅数据存在 Sub-Store 里"，Agent 无法只把 Sub-Store 当无状态转换器**。
 4. **`url=` 覆盖在命名路由上有效** `[实测]`：`GET /download/agenttmp?target=mihomo&url=<另一个地址>` 返回 200，可绕过数据库中的 `sub.url`。这是 Adapter 实现"外部订阅源由 Agent 掌管"的关键机制——但**订阅名仍必须先在库中存在**。
 5. **输出不是完整 Mihomo 配置，只是 `proxies:` 片段** `[实测]`：响应体 433 B，仅含 `proxies:` + 两个节点，**没有** `mixed-port` / `external-controller` / `secret` / `dns` / `rules` / `proxy-groups`。Agent 必须自己补全为可运行配置（与设计文档 §16 的"生成配置"职责一致，但它**必须由 Agent 承担**）。
