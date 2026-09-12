@@ -37,6 +37,8 @@ rusqlite = { workspace = true, features = ["bundled"] }
 # plus rename is the only way the target is ever seen fully-old or fully-new.
 tempfile.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
+flate2.workspace = true
 # The one wrapper crate containing unsafe code; see its crate docs.
 proxy-sys = { path = "../sys" }
 

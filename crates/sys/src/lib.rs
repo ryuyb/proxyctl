@@ -186,19 +186,26 @@ mod tests {
 
     /// The maximum legal length must be accepted by the validation, so the check
     /// is not off by one.
+    ///
+    /// Measured on Linux: `ioctl(-1, TUNSETIFF, …)` returns -1 with `EBADF`, which
+    /// surfaces as [`TunSetIffOutcome::Failed`] rather than as a validation error.
+    /// Asserting `Err` here would be asserting the wrong contract.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_maximum_name_length_is_accepted_by_validation() {
         let exact = "a".repeat(MAX_INTERFACE_NAME);
-        // The call itself fails on a closed fd, which is fine: the point is that
-        // it was not rejected as invalid input.
         match tun_set_iff(-1, &exact) {
+            // EBADF is not a permission or device answer, so it must land in
+            // the catch-all rather than being mistaken for either. The specific
+            // `ErrorKind` is deliberately not asserted: its name for EBADF is
+            // not stable across toolchains.
+            Ok(TunSetIffOutcome::Failed(_)) => {}
+            Ok(other) => panic!("an invalid fd must not report {other:?}"),
             Err(e) => assert_ne!(
                 e.kind(),
                 io::ErrorKind::InvalidInput,
-                "the maximum length must not be rejected"
+                "the maximum length must not be rejected as invalid input"
             ),
-            Ok(_) => panic!("an invalid fd cannot succeed"),
         }
     }
 
@@ -207,12 +214,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_bogus_descriptor_does_not_panic() {
-        let outcome = tun_set_iff(-1, "proxyctl-probe");
-        match outcome {
-            Ok(TunSetIffOutcome::Failed(_) | TunSetIffOutcome::PermissionDenied) => {}
-            // EBADF is reported as a failure kind, which is what we expect here.
+        // Measured: -1 yields EBADF, which is a failure rather than a refusal.
+        match tun_set_iff(-1, "proxyctl-probe") {
+            Ok(TunSetIffOutcome::Failed(_)) => {}
             Ok(other) => panic!("unexpected outcome from an invalid fd: {other:?}"),
-            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidInput),
+            Err(e) => panic!("EBADF must be an outcome, not an input error: {e}"),
         }
     }
 

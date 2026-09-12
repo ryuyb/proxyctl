@@ -36,6 +36,12 @@ rusqlite = { version = "0.40", default-features = false }
 # maintained-by-the-same-author, working implementation; its successor is not yet
 # stable. Revisit when it is.
 serde_yaml = "0.9"
+# Verifying a downloaded kernel binary. `sha2` is RustCrypto's audited
+# implementation; the digest it produces is what GitHub's release API publishes
+# per asset, which is the only trustworthy checksum available upstream.
+sha2 = "0.10"
+# Decompressing the downloaded kernel artifact, which upstream publishes gzipped.
+flate2 = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

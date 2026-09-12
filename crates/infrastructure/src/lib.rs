@@ -25,6 +25,7 @@
 )]
 
 pub mod events;
+pub mod kernel;
 pub mod mihomo;
 pub mod process;
 pub mod storage;
