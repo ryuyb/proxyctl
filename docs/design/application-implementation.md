@@ -1155,6 +1155,26 @@ cargo build --workspace
 | 同一订阅并发更新被抑制 | `concurrent_subscription_updates_are_suppressed` |
 | 每个 job 都到达终态 | `jobs_always_reach_a_terminal_state` |
 
-### 12.3 尚未实现
+### 12.3 已实现的 Use Case 全清单
 
-按 §10，以下仍未实现：生命周期命令（start/stop/restart/reload）、`UpdateSubscription` 与订阅 CRUD、只读 queries、`UpdateKernel`。Ports、锁、job/事件模型、`ActivateConfig`、`RollbackConfig` 已就绪，可作为它们的基础。
+| 模块 | Use Case | 状态 |
+|---|---|---|
+| `commands/activate_config.rs` | `ActivateConfig` | ✅ |
+| `commands/rollback_config.rs` | `RollbackConfig` | ✅ |
+| `commands/lifecycle.rs` | `StartMihomo`、`StopMihomo`、`RestartMihomo`、`ReloadMihomo`、`signal_kernel` | ✅ |
+| `commands/update_subscription.rs` | `UpdateSubscription`、`SubscriptionCrud`（save/delete/list/get/test） | ✅ |
+| `queries.rs` | `GetMihomoStatus`、`ListConfigs`、`ListSubscriptions`、`GetCapabilities`、`RunDoctor`、`ListJobs`、`ListAuditEntries` | ✅ |
+
+**测试补充（本轮新增）**：`lifecycle.rs` 12 个、`subscription.rs` 23 个。
+
+### 12.4 本轮实现期修正
+
+| 项 | 问题 | 处置 |
+|---|---|---|
+| `RestartMihomo` 自死锁 | 取实例锁后又调用 `StartMihomo::execute`（同锁不可重入） | 拆出 `start_locked` 内部助手，并**显式修正**设计文档 §3 未说明的锁非重入约束（写进 `commands/mod.rs` 模块文档） |
+| 失败路径不发布事件 | 转换失败/校验失败走 early return，跳过 `SubscriptionUpdated` 事件 → 订阅连续失败多日时面板仍显示"从未更新" | 统一为 `fail_and_announce`，**所有**失败路径都记录并广播（由测试 `update_publishes_an_event_for_both_outcomes` 暴露） |
+| `Subscription` 占位对象 | 早期版本为"订阅不存在"构造占位订阅，内部用 `unreachable!()` | 改为 `Option<&mut Subscription>`：失败可先于拥有订阅发生，不需要伪造对象，也不引入 panic |
+| 就绪判定 | 文档未明确 | 轮询 `health_check` 至截止（默认 30s），**不 sleep 固定时长**；内核绑定失败不致命，代理端口未监听时判 `Degraded` 而非 `Running` |
+| 内核重启方式 | 文档未明确 | stop-then-start，**不使用**内核的 self-restart（原地替换进程映像，Agent 无法观测且状态丢失） |
+| `ReloadMihomo` 语义 | 文档未明确 | 只重载**已激活**版本，不生成/校验新配置；变更配置走 `ActivateConfig` |
+| Queries 取锁 | 文档 §5.1 已规定不取锁 | 实现确认；新增测试 `read_only_queries_are_not_blocked_by_an_activation` |

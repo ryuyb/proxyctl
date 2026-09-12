@@ -797,6 +797,14 @@ impl FakeConverter {
     }
 }
 
+impl FakeConverter {
+    /// How many times `convert` was called.
+    #[must_use]
+    pub fn calls_count(&self) -> usize {
+        self.calls.count("convert")
+    }
+}
+
 #[async_trait]
 impl SubscriptionConverter for FakeConverter {
     async fn convert(&self, _request: &ConvertRequest) -> Result<ConvertedProxies, PortError> {
@@ -1102,6 +1110,16 @@ pub struct Harness {
     pub subscriptions: Arc<FakeSubscriptionRepository>,
     /// Shared call log for ordering assertions.
     pub calls: CallLog,
+    /// The converter, so tests can assert on its behaviour.
+    pub converter: Arc<FakeConverter>,
+}
+
+impl Harness {
+    /// How many times the converter was asked to convert.
+    #[must_use]
+    pub fn converter_calls(&self) -> usize {
+        self.converter.calls_count()
+    }
 }
 
 impl Harness {
@@ -1116,6 +1134,7 @@ impl Harness {
         let events = Arc::new(FakeEventPublisher::new(calls.clone()));
         let jobs = Arc::new(FakeJobRegistry::default());
         let subscriptions = Arc::new(FakeSubscriptionRepository::default());
+        let converter = Arc::new(converter);
 
         let ctx = AppContext {
             instance: MihomoInstanceId::parse("default").expect("valid instance id"),
@@ -1126,7 +1145,7 @@ impl Harness {
             configs: configs.clone(),
             validator: Arc::new(validator),
             subscriptions: subscriptions.clone(),
-            converter: Arc::new(converter),
+            converter: converter.clone(),
             capabilities: Arc::new(FakeCapabilityProbe::minimal()),
             services: Arc::new(FakeServiceManager),
             secrets: Arc::new(FakeSecretStore::default()),
@@ -1149,6 +1168,7 @@ impl Harness {
             jobs,
             subscriptions,
             calls,
+            converter,
         }
     }
 
