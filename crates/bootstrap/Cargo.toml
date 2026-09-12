@@ -32,6 +32,9 @@ async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+# The log forwarder consumes a stream and the event bridge drives one.
+futures-util = { workspace = true }
+async-stream = { workspace = true }
 
 [features]
 # Enables the in-memory adapter factory so composition can be verified without

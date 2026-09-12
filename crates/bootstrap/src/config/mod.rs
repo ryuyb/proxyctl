@@ -238,6 +238,11 @@ pub struct RuntimeConfig {
     /// does not authenticate requests at all, so this is not sent and the
     /// socket's file permissions are the whole boundary.
     pub mihomo_secret: Option<String>,
+    /// Whether the agent republishes kernel logs as events.
+    ///
+    /// Off by default: enabling it reads and redacts every kernel log line
+    /// continuously, and discloses network activity to anyone who may subscribe.
+    pub publish_mihomo_logs: bool,
 }
 
 impl RuntimeConfig {
@@ -258,6 +263,7 @@ impl RuntimeConfig {
             socket_allowed_uid: None,
             socket_allowed_gid: None,
             mihomo_secret: None,
+            publish_mihomo_logs: false,
         }
     }
 
@@ -287,6 +293,7 @@ impl RuntimeConfig {
             socket_allowed_uid: None,
             socket_allowed_gid: None,
             mihomo_secret: None,
+            publish_mihomo_logs: false,
         }
     }
 

@@ -498,6 +498,27 @@ pub fn merge(inputs: &Inputs) -> Result<Resolved, BootstrapError> {
         write_probes.source,
     ));
 
+    // Off unless the file says otherwise. There is no argument or environment
+    // override: this setting decides whether network activity is disclosed to
+    // event subscribers, and a one-shot flag is the wrong shape for a decision
+    // that should be visible in the deployment's own configuration.
+    let publish_logs = inputs
+        .file
+        .as_ref()
+        .filter(|f| {
+            f.security
+                .as_ref()
+                .and_then(|s| s.publish_mihomo_logs)
+                .is_some()
+        })
+        .map(|f| Attributed::file(f.publish_mihomo_logs()))
+        .unwrap_or_else(|| Attributed::default_value(false));
+    provenance.push((
+        "security.publish_mihomo_logs".to_owned(),
+        publish_logs.value.to_string(),
+        publish_logs.source,
+    ));
+
     // --- the socket's peer credential -------------------------------------
     let allowed_uid = inputs
         .file
@@ -548,6 +569,7 @@ pub fn merge(inputs: &Inputs) -> Result<Resolved, BootstrapError> {
         socket_allowed_uid: nonzero(allowed_uid.value),
         socket_allowed_gid: nonzero(allowed_gid.value),
         mihomo_secret: secret,
+        publish_mihomo_logs: publish_logs.value,
     };
 
     Ok(Resolved {

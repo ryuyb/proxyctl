@@ -7,6 +7,7 @@
 
 pub mod configs;
 pub mod connections;
+pub mod events;
 pub mod jobs;
 pub mod logs;
 pub mod mihomo;
@@ -84,4 +85,8 @@ pub fn router() -> Router<AppState> {
         // deliberately not paginated or limited: the caller stops by
         // disconnecting, which is what a stream is for.
         .route(&format!("{API_PREFIX}/logs"), get(logs::logs))
+        // Not under `API_PREFIX`: the path is fixed by the design document and
+        // predates the versioning scheme. `/ws/v1/events` is itself versioned, so
+        // it keeps its own shape rather than gaining a second prefix.
+        .route("/ws/v1/events", get(events::stream))
 }

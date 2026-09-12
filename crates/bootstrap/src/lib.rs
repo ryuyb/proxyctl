@@ -29,6 +29,8 @@
 pub mod adapter_factory;
 pub mod composition;
 pub mod config;
+pub mod event_bridge;
+pub mod log_forwarder;
 pub mod real_factory;
 
 pub use adapter_factory::AdapterFactory;
@@ -51,6 +53,7 @@ pub use real_factory::RealFactory;
 pub fn build_http_server(
     context: std::sync::Arc<proxy_application::AppContext>,
     config: &RuntimeConfig,
+    events: Option<std::sync::Arc<dyn proxy_interfaces::http::state::EventSource>>,
 ) -> Result<proxy_interfaces::http::HttpServer, BootstrapError> {
     use proxy_interfaces::http::server::SocketSpec;
     use proxy_interfaces::http::state::{AppState, AuthPolicy};
@@ -71,7 +74,13 @@ pub fn build_http_server(
         require_bearer: false,
     };
 
-    let state = AppState::new(context, policy);
+    // The event source is optional so a composition without one still serves. The
+    // endpoint reports its absence rather than hanging, which is what lets an
+    // operator tell a quiet system from a wiring mistake.
+    let state = match events {
+        Some(events) => AppState::with_events(context, policy, events),
+        None => AppState::new(context, policy),
+    };
     Ok(proxy_interfaces::http::HttpServer::new(
         state,
         SocketSpec::new(path),

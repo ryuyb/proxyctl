@@ -153,6 +153,16 @@ pub struct SecuritySection {
     pub subscription_allow: Option<Vec<String>>,
     /// Whether to run capability probes that write to the host.
     pub allow_write_probes: Option<bool>,
+    /// Whether the agent reads the kernel's logs continuously and republishes
+    /// them as events.
+    ///
+    /// Off by default, and the default is the important part. Turning it on means
+    /// the agent reads and redacts every kernel log line whether or not anyone is
+    /// watching, and that anyone permitted to subscribe to the event stream sees
+    /// the agent's network activity — which hosts, which DNS answers, which rules
+    /// matched — even after credentials are stripped. That is a real disclosure,
+    /// so it takes an explicit opt-in rather than arriving switched on.
+    pub publish_mihomo_logs: Option<bool>,
 }
 
 /// What the file says about the kernel secret.
@@ -228,6 +238,18 @@ impl FileConfig {
         self.security
             .as_ref()
             .and_then(|s| s.allow_write_probes)
+            .unwrap_or(false)
+    }
+
+    /// Whether kernel logs are republished as events.
+    ///
+    /// Defaults to `false`: see the field's own documentation for why the default
+    /// matters more than the setting.
+    #[must_use]
+    pub fn publish_mihomo_logs(&self) -> bool {
+        self.security
+            .as_ref()
+            .and_then(|s| s.publish_mihomo_logs)
             .unwrap_or(false)
     }
 }
