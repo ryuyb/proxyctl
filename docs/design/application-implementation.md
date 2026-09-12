@@ -1178,3 +1178,72 @@ cargo build --workspace
 | 内核重启方式 | 文档未明确 | stop-then-start，**不使用**内核的 self-restart（原地替换进程映像，Agent 无法观测且状态丢失） |
 | `ReloadMihomo` 语义 | 文档未明确 | 只重载**已激活**版本，不生成/校验新配置；变更配置走 `ActivateConfig` |
 | Queries 取锁 | 文档 §5.1 已规定不取锁 | 实现确认；新增测试 `read_only_queries_are_not_blocked_by_an_activation` |
+
+---
+
+## 13. 最小 Bootstrap 与一个真实缺陷的发现
+
+### 13.1 产出
+
+| 项 | 内容 |
+|---|---|
+| `crates/bootstrap` | `AdapterFactory`（适配器供给）、`Bootstrap`（组装 + 选择决策）、`RuntimeConfig` |
+| `crates/application` 新增 | `AppContextBuilder`（19 字段分步装配）、`InstanceRepository` Port、`FakeInstanceRepository` |
+| feature 拆分 | `test-doubles`（仅装配所需的最小替身）/ `test-support`（含故障注入） |
+| 测试 | bootstrap 18 个（含 9 个 smoke）；application 138 个 |
+
+### 13.2 ⚠️ 发现并修复了一个真实的并发缺陷
+
+**症状**：4 个并发 `StartMihomo` **全部 spawn 了进程**（4 次 `process.start`），而 per-instance 锁本应保证只有一次。
+
+**根因**：`StartMihomo::execute` 的签名是
+
+```rust
+pub async fn execute(ctx: &AppContext, instance: &mut MihomoInstance, now: Timestamp)
+```
+
+聚合由**调用方持有**。于是：
+
+```text
+任务 A: 取锁 → 看到自己的副本 Stopped → 决定 Spawn → 放锁
+任务 B: 取锁 → 看到自己的副本 Stopped → 决定 Spawn → 放锁   ← 副本从未更新
+```
+
+**锁串行化了 `process.start` 的调用，但没有串行化决策本身** —— 因为决策依据是每个调用方各自的副本。
+
+**为什么这是设计文档的实现偏差**：设计 §4.5 的第 1 步明确写了「**载入实例聚合**（含状态机）」，且原签名是 `execute(ctx)`（无 `instance` 参数）。我在实现时为了方便测试引入了 `&mut MihomoInstance` 参数，把共享状态变成了调用方局部状态。
+
+**修复**：
+
+1. 新增 `InstanceRepository` Port（`load` / `save` / `list`），状态存在所有调用方都能看到的地方。
+2. 生命周期命令改为在**取锁之后** `load_instance()`，在**放锁之前** `save_instance()`。
+3. `Starting` 状态在 spawn **之前**持久化，使并发请求看到"启动中"而非"已停止"。
+
+**验证**：`concurrent_starts_on_a_composed_context_spawn_once` 从「4 tasks spawned」变为通过。
+
+**教训**：这个缺陷**只有真正的端到端组装 + 并发测试才能发现** —— 原有的 `lifecycle.rs` 测试每个用例各持一个 `instance`，串行调用，永远看不到问题。这正是做最小 bootstrap 的价值。
+
+### 13.3 为什么 `AppContextBuilder::build()` 返回 `Result`
+
+新增 `instances` 字段后，全部 18 个 activation 测试立刻失败，报错是：
+
+```text
+every dependency is supplied above: MissingDependency("instances")
+```
+
+这正是不返回 `Result` 时**得不到**的信息 —— 编译器只会给出一片 "missing field" 错误。分步装配 + 具名缺失依赖，让"You forgot X"变成一条可读的报告。
+
+### 13.4 最小 Bootstrap 验证了什么
+
+| # | 属性 | 测试 |
+|---|---|---|
+| S1 | 16 个依赖全部可装配，`Arc<dyn Port>` 满足 `Send + Sync + 'static` | `in_memory_composition_wires_every_dependency` |
+| S2 | 组装产物能跑通真实 Use Case（activation / lifecycle / query） | `assembled_context_runs_*` |
+| S3 | 组装产物可跨 task 共享 | `assembled_context_is_shareable_across_tasks` |
+| S4 | 并发生命周期只 spawn 一次（**缺陷回归测试**） | `concurrent_starts_on_a_composed_context_spawn_once` |
+| S5 | 环境探测失败不产出上下文 | `environment_probe_failure_is_reported` |
+| S6 | 无 init system 是合法部署 | `composition_succeeds_without_an_init_system` |
+
+### 13.5 尚未实现
+
+`Bootstrap::build` 的**真实** `AdapterFactory` 实现（需要 Infrastructure 存在）。当前 `InMemoryFactory` 用于验证装配；换入真实 adapter 不改 `Bootstrap` 一行代码 —— 这是 `AdapterFactory` 抽象的目的。

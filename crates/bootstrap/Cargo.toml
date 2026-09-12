@@ -1,0 +1,42 @@
+[package]
+name = "proxy-bootstrap"
+description = "Composition root for the Mihomo management agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "proxy_bootstrap"
+path = "src/lib.rs"
+
+# The composition root is the only crate permitted to know both the application
+# traits and concrete adapters. It contains no business logic: it selects
+# implementations and hands them to the application layer.
+[dependencies]
+proxy-domain = { path = "../domain" }
+proxy-application = { path = "../application" }
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[features]
+# Enables the in-memory adapter factory so composition can be verified without
+# real adapters. Used by tests and by anyone bootstrapping a fake context.
+test-doubles = ["proxy-application/test-doubles"]
+
+[dev-dependencies]
+# The in-memory doubles let the wiring be verified before any real adapter
+# exists. Only the minimal set is requested; the fault-injection harness is for
+# the application layer's own tests.
+proxy-application = { path = "../application", features = ["test-doubles"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+
+[[test]]
+name = "smoke"
+required-features = ["test-doubles"]
+
+[lints]
+workspace = true
