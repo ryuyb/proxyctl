@@ -29,6 +29,10 @@ futures-core = { workspace = true }
 # this crate forbids unsafe code, and a wrapper crate is the honest way to get a
 # syscall without weakening that guarantee for the whole layer.
 nix = { workspace = true, features = ["signal"] }
+# `rusqlite` is synchronous and `Connection` is not `Sync`, so adapters run it
+# on the blocking pool behind a bounded connection set rather than sharing one
+# connection behind a global mutex. See `storage` for why that matters.
+rusqlite = { workspace = true, features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
