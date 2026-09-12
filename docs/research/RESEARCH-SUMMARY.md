@@ -150,7 +150,9 @@ Phase 0 调研**推翻了设计文档中的若干假设**，实现前必须按�
 ### 7.2 必须在对应里程碑前收口的开放问题
 
 ```text
-Q015 / Q016  → 打包与内嵌前（镜像下载合规性；metacubexd 的 Highcharts 专有许可）
+Q016          → 内嵌前（metacubexd 的 Highcharts 专有许可）
+
+> **Q015 已于 2026-09-12 收口**：默认不经镜像，只从上游 release 直连；实测发现上游**不发布 `.sha256` 文件**，校验改走 GitHub API 的 asset `digest`。
 Q020         → Config L2 校验实现前（mihomo -t 是否真的无副作用）
 Q023         → SubscriptionConverter Adapter 实现前（是否必须写入 Sub-Store 库）
 Q009 / Q004  → Linux / PVE 里程碑前（真机补测）
