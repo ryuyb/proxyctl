@@ -1,0 +1,47 @@
+[package]
+name = "proxy-application"
+description = "Use cases and port definitions for the Mihomo management agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "proxy_application"
+path = "src/lib.rs"
+
+# This crate owns orchestration and declares ports. It depends on the domain and
+# on async primitives only. Concrete adapters (http clients, database drivers,
+# process spawning) live in infrastructure and are reached through the traits
+# declared here.
+[dependencies]
+proxy-domain = { path = "../domain" }
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+# Used by the observer port for its boxed streams, and by the in-memory doubles
+# that produce empty ones.
+futures-core.workspace = true
+
+[features]
+# Exposes in-memory doubles that also allow fault injection, so failure paths can
+# be tested. Off by default: shipping builds must not carry test scaffolding.
+test-support = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+
+# Integration tests exercise the use cases through the in-memory doubles, so the
+# feature must be on for them.
+[[test]]
+name = "activation"
+required-features = ["test-support"]
+
+[[test]]
+name = "concurrency"
+required-features = ["test-support"]
+
+[lints]
+workspace = true
