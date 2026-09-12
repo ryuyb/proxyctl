@@ -52,7 +52,9 @@ use proxy_application::ports::event_publisher::EventPublisher;
 use proxy_application::ports::instance_repository::InstanceRepository;
 use proxy_application::ports::job_registry::JobRegistry;
 use proxy_application::ports::kernel_installer::KernelInstaller;
-use proxy_application::ports::mihomo_connection_ops::{ConnectionList, MihomoConnectionOps};
+use proxy_application::ports::mihomo_connection_ops::{
+    CloseOutcome, ConnectionList, MihomoConnectionOps,
+};
 use proxy_application::ports::mihomo_controller::{MihomoController, ReloadRequest};
 use proxy_application::ports::mihomo_observer::{
     BoxStream, LogEntry, MemorySample, MihomoObserver, TrafficSample,
@@ -73,6 +75,7 @@ use proxy_domain::subscription::ConvertedProxies;
 use proxy_domain::system::environment::InitSystem;
 use proxy_infrastructure::events::BroadcastEventPublisher;
 use proxy_infrastructure::kernel::GithubKernelInstaller;
+use proxy_infrastructure::mihomo::connections::KernelConnections;
 use proxy_infrastructure::mihomo::observer::KernelObserver;
 use proxy_infrastructure::mihomo::{HttpMihomoController, LoopbackTransport, UnixSocketTransport};
 use proxy_infrastructure::process::SupervisedChildProcess;
@@ -275,31 +278,27 @@ impl MihomoObserver for UnusableObserver {
     }
 }
 
-/// Connection operations, which have no adapter yet.
-#[derive(Debug, Clone, Copy)]
-struct UnavailableConnections;
+/// Connection operations whose transport could not be created.
+///
+/// Reported on use rather than at composition, mirroring the controller and the
+/// observer: a bad endpoint should not stop the agent from starting and explaining
+/// itself.
+struct UnusableConnections {
+    reason: String,
+}
 
 #[async_trait]
-impl MihomoConnectionOps for UnavailableConnections {
+impl MihomoConnectionOps for UnusableConnections {
     async fn connections(&self) -> Result<ConnectionList, PortError> {
-        Err(unimplemented(
-            "MihomoConnectionOps",
-            "the connection-list response mapping has not been verified against a live kernel",
-        ))
+        Err(PortError::Transport(self.reason.clone()))
     }
 
-    async fn close_connection(&self, _id: &str) -> Result<(), PortError> {
-        Err(unimplemented(
-            "MihomoConnectionOps",
-            "the connection-list response mapping has not been verified against a live kernel",
-        ))
+    async fn close_connection(&self, _id: &str) -> Result<CloseOutcome, PortError> {
+        Err(PortError::Transport(self.reason.clone()))
     }
 
-    async fn close_all(&self) -> Result<(), PortError> {
-        Err(unimplemented(
-            "MihomoConnectionOps",
-            "the connection-list response mapping has not been verified against a live kernel",
-        ))
+    async fn close_all(&self) -> Result<usize, PortError> {
+        Err(PortError::Transport(self.reason.clone()))
     }
 }
 
@@ -435,8 +434,28 @@ impl AdapterFactory for RealFactory {
         }
     }
 
-    fn connections(&self) -> Arc<dyn MihomoConnectionOps> {
-        Arc::new(UnavailableConnections)
+    fn connections(&self, endpoint: &ControllerEndpoint) -> Arc<dyn MihomoConnectionOps> {
+        // The endpoint is passed in rather than stored, so all three of controller,
+        // observer, and connections are guaranteed to address one kernel.
+        match endpoint {
+            ControllerEndpoint::UnixSocket(path) => {
+                match UnixSocketTransport::new(path.clone(), CONTROLLER_TIMEOUT) {
+                    Ok(transport) => Arc::new(KernelConnections::new(transport)),
+                    Err(e) => Arc::new(UnusableConnections {
+                        reason: format!("the unix socket transport could not be created: {e}"),
+                    }),
+                }
+            }
+            ControllerEndpoint::Loopback { address } => {
+                let secret = self.mihomo_secret.clone().unwrap_or_default();
+                match LoopbackTransport::new(address.as_str(), &secret, CONTROLLER_TIMEOUT) {
+                    Ok(transport) => Arc::new(KernelConnections::new(transport)),
+                    Err(e) => Arc::new(UnusableConnections {
+                        reason: format!("the loopback transport could not be created: {e}"),
+                    }),
+                }
+            }
+        }
     }
 
     fn configs(&self, _paths: &DataPaths) -> Arc<dyn ConfigRepository> {
@@ -593,7 +612,7 @@ mod tests {
         let _ = factory.controller(&config.controller);
         let _ = factory.process(InitSystem::Systemd);
         let _ = factory.observer(&config.controller);
-        let _ = factory.connections();
+        let _ = factory.connections(&config.controller);
         let _ = factory.configs(&config.paths);
         let _ = factory.validator();
         let _ = factory.subscriptions();
@@ -639,9 +658,24 @@ mod tests {
             Ok(_) => panic!("nothing is listening, so no stream can be opened"),
         }
 
-        let connections = factory.connections();
-        let err = connections.connections().await.expect_err("no adapter");
-        assert!(err.to_string().contains("MihomoConnectionOps"), "{err}");
+        let connections = factory.connections(&config.controller);
+        // The adapter exists now, so the failure is the transport's: nothing is
+        // listening on the controller socket. As with the observer, the point is
+        // that an operator can tell "not built yet" from "the kernel is not
+        // running".
+        let err = connections
+            .connections()
+            .await
+            .expect_err("nothing is listening");
+        let text = err.to_string();
+        assert!(
+            !text.contains("unimplemented"),
+            "connections must not claim to be unimplemented: {text}"
+        );
+        assert!(
+            matches!(err, PortError::Unreachable(_) | PortError::Transport(_)),
+            "expected a transport-level failure, got {text}"
+        );
 
         // The converter is a different case from the two above: a missing
         // converter is a *supported deployment* rather than an unimplemented

@@ -102,8 +102,11 @@ async fn environment_probe_failure_is_reported() {
         ) -> Arc<dyn proxy_application::ports::MihomoObserver> {
             Arc::new(proxy_application::test_support::FakeObserver)
         }
-        fn connections(&self) -> Arc<dyn proxy_application::ports::MihomoConnectionOps> {
-            Arc::new(proxy_application::test_support::FakeConnectionOps)
+        fn connections(
+            &self,
+            _endpoint: &proxy_bootstrap::ControllerEndpoint,
+        ) -> Arc<dyn proxy_application::ports::MihomoConnectionOps> {
+            Arc::new(proxy_application::test_support::FakeConnectionOps::default())
         }
         fn configs(
             &self,

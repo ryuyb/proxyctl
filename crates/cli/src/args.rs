@@ -81,6 +81,10 @@ pub enum TopCommand {
 
     /// Stream the kernel's logs.
     Logs(LogsArgs),
+
+    /// Inspect and close the kernel's connections.
+    #[command(subcommand)]
+    Connections(ConnectionsCommand),
 }
 
 /// The `agent` subcommand.
@@ -238,6 +242,36 @@ pub struct AuditArgs {
     /// How many records to request.
     #[arg(long, default_value_t = 50)]
     pub limit: u32,
+}
+
+/// The `connections` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ConnectionsCommand {
+    /// List active connections.
+    List,
+    /// Close one connection, or every connection.
+    Close(CloseArgs),
+}
+
+/// The `connections close` arguments.
+#[derive(Debug, Args)]
+pub struct CloseArgs {
+    /// The connection to close. Omit with `--all` to close every connection.
+    #[arg(value_name = "ID", required_unless_present = "all")]
+    pub id: Option<String>,
+
+    /// Close every connection. Requires `--yes`.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Confirm closing every connection.
+    ///
+    /// Required when `--all` is given. Closing every connection interrupts every
+    /// active transfer at once, which is the only operation in this CLI whose blast
+    /// radius is "all users", so it is the only one that needs an explicit
+    /// acknowledgement.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// The `logs` arguments.

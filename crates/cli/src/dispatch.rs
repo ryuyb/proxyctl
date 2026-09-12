@@ -5,8 +5,8 @@
 //! easier to assert here than through a process boundary.
 
 use crate::args::{
-    AgentAction, AgentArgs, Cli, ConfigCommand, LogsArgs, MihomoCommand, SubscriptionCommand,
-    TopCommand,
+    AgentAction, AgentArgs, Cli, ConfigCommand, ConnectionsCommand, LogsArgs, MihomoCommand,
+    SubscriptionCommand, TopCommand,
 };
 use crate::command::{self, Command, Format};
 use crate::exit::Exit;
@@ -60,6 +60,21 @@ pub async fn run(cli: Cli) -> Exit {
     // trait that every other command implements.
     if let TopCommand::Logs(args) = &cli.command {
         return stream_logs(&cli.socket, args, format).await;
+    }
+
+    // `connections close --all` needs an acknowledgement before anything is sent.
+    // The server also requires one, so this is the client-side half of a gate that
+    // exists on both sides: a mistyped `--all` must not reach the kernel because
+    // the caller's own shell was the only thing that could have stopped it.
+    if let TopCommand::Connections(ConnectionsCommand::Close(args)) = &cli.command
+        && args.all
+        && !args.yes
+    {
+        eprintln!(
+            "proxyctl: closing every connection interrupts all active transfers; \
+             pass --yes to confirm"
+        );
+        return Exit::Usage;
     }
 
     let Some(command) = build(&cli.command) else {
@@ -251,6 +266,10 @@ pub fn build(top: &TopCommand) -> Option<Box<dyn Command>> {
             id: args.id.clone(),
         }),
         TopCommand::Audit(args) => Box::new(Audit { limit: args.limit }),
+        TopCommand::Connections(ConnectionsCommand::List) => Box::new(Connections),
+        TopCommand::Connections(ConnectionsCommand::Close(args)) => Box::new(CloseConnections {
+            id: args.id.clone(),
+        }),
         TopCommand::Logs(_) | TopCommand::Agent(_) => return None,
     };
     Some(command)

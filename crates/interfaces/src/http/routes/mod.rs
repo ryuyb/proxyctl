@@ -6,6 +6,7 @@
 //! to name the endpoint and shape the response.
 
 pub mod configs;
+pub mod connections;
 pub mod jobs;
 pub mod logs;
 pub mod mihomo;
@@ -13,7 +14,7 @@ pub mod subscriptions;
 pub mod system;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
 use super::state::AppState;
 
@@ -71,6 +72,14 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{API_PREFIX}/jobs"), get(jobs::list))
         .route(&format!("{API_PREFIX}/jobs/{{id}}"), get(jobs::get))
         .route(&format!("{API_PREFIX}/audit"), get(jobs::audit))
+        .route(
+            &format!("{API_PREFIX}/connections"),
+            get(connections::list).delete(connections::close_all),
+        )
+        .route(
+            &format!("{API_PREFIX}/connections/{{id}}"),
+            delete(connections::close_one),
+        )
         // The only streaming route. It holds the connection open, so it is
         // deliberately not paginated or limited: the caller stops by
         // disconnecting, which is what a stream is for.

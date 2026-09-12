@@ -14,6 +14,7 @@
 //! a field to a domain type does not add it to the API until someone writes the
 //! line, which is exactly the review checkpoint this layer provides.
 
+use proxy_application::ports::mihomo_connection_ops::{ConnectionList, ConnectionView};
 use serde::{Deserialize, Serialize};
 
 use proxy_application::ports::job_registry::{JobRecord, JobState};
@@ -435,6 +436,115 @@ pub struct ValidationDto {
     pub semantic: String,
     /// Whether every layer passed or was skipped.
     pub acceptable: bool,
+}
+
+/// One live connection.
+///
+/// The process-identifying fields are absent for a non-administrative caller: the
+/// application layer removes them before this mapping runs, so a `None` here means
+/// "not disclosed" rather than "not readable". The two are not distinguished,
+/// deliberately — telling a caller *why* a field is empty would reveal that it
+/// exists and would be populated for someone else.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionDto {
+    /// The kernel's identifier.
+    pub id: String,
+    /// Originating address.
+    pub source: String,
+    /// Destination: the sniffed host when there is one, otherwise `host:port`.
+    pub destination: String,
+    /// The matched rule's type, when something matched.
+    pub rule: Option<String>,
+    /// The matched rule's payload.
+    pub rule_payload: Option<String>,
+    /// The match chain, outermost first.
+    pub chains: Vec<String>,
+    /// Originating process uid, administrative callers only.
+    pub uid: Option<u32>,
+    /// Originating process name, administrative callers only.
+    pub process: Option<String>,
+    /// Originating executable path, administrative callers only.
+    pub process_path: Option<String>,
+    /// When the connection was established, in Unix seconds.
+    pub started_at: Option<i64>,
+    /// Bytes uploaded.
+    pub upload: u64,
+    /// Bytes downloaded.
+    pub download: u64,
+    /// The inbound listener that accepted it.
+    pub inbound: Option<String>,
+}
+
+impl From<ConnectionView> for ConnectionDto {
+    fn from(view: ConnectionView) -> Self {
+        Self {
+            id: view.id,
+            source: view.source,
+            destination: view.destination,
+            rule: view.rule,
+            rule_payload: view.rule_payload,
+            chains: view.chains,
+            uid: view.uid,
+            process: view.process,
+            process_path: view.process_path,
+            started_at: view.started_at.map(|t| t.as_unix_seconds()),
+            upload: view.upload,
+            download: view.download,
+            inbound: view.inbound,
+        }
+    }
+}
+
+/// The connection list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionsDto {
+    /// Total bytes uploaded, across all connections.
+    pub upload_total: u64,
+    /// Total bytes downloaded.
+    pub download_total: u64,
+    /// The active connections.
+    pub connections: Vec<ConnectionDto>,
+}
+
+impl From<ConnectionList> for ConnectionsDto {
+    fn from(list: ConnectionList) -> Self {
+        Self {
+            upload_total: list.upload_total,
+            download_total: list.download_total,
+            connections: list
+                .connections
+                .into_iter()
+                .map(ConnectionDto::from)
+                .collect(),
+        }
+    }
+}
+
+/// The result of a close request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseResultDto {
+    /// `accepted`, or `rejected:<status>`.
+    ///
+    /// The kernel answers `204` for a connection it closed *and* for one that
+    /// never existed, so "accepted" is the strongest statement available. A DTO
+    /// field named `closed: true` would overstate what is known.
+    pub outcome: String,
+    /// How many connections this request covered.
+    pub closed: usize,
+    /// A shortcoming worth surfacing, such as an unwritable audit record.
+    pub degradation: Option<String>,
+}
+
+/// A request to close every connection.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CloseAllInput {
+    /// The caller's confirmation.
+    ///
+    /// Required, and required to be `true`: this is the only endpoint that
+    /// interrupts every transfer at once, and the most likely way to reach it by
+    /// accident is a request that omitted the connection identifier.
+    #[serde(default)]
+    pub confirm: Option<bool>,
 }
 
 /// An error response.

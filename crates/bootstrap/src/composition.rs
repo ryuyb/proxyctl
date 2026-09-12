@@ -108,7 +108,7 @@ impl Bootstrap {
             .controller(controller)
             .process(process)
             .observer(factory.observer(&endpoint))
-            .connections(factory.connections())
+            .connections(factory.connections(&endpoint))
             .configs(factory.configs(&config.paths))
             .validator(factory.validator())
             .subscriptions(factory.subscriptions())

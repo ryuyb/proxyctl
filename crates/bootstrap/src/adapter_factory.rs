@@ -52,8 +52,11 @@ pub trait AdapterFactory: Send + Sync {
     /// the controller commanded another.
     fn observer(&self, endpoint: &ControllerEndpoint) -> Arc<dyn MihomoObserver>;
 
-    /// Connection inspection.
-    fn connections(&self) -> Arc<dyn MihomoConnectionOps>;
+    /// Connection inspection for the kernel reached through `endpoint`.
+    ///
+    /// Takes the endpoint for the same reason [`observer`](Self::observer) does:
+    /// every one of these reads the same kernel, so they must share one transport.
+    fn connections(&self, endpoint: &ControllerEndpoint) -> Arc<dyn MihomoConnectionOps>;
 
     /// Configuration version storage.
     fn configs(&self, paths: &DataPaths) -> Arc<dyn ConfigRepository>;
@@ -143,8 +146,8 @@ pub mod in_memory {
             Arc::new(FakeObserver)
         }
 
-        fn connections(&self) -> Arc<dyn MihomoConnectionOps> {
-            Arc::new(FakeConnectionOps)
+        fn connections(&self, _endpoint: &ControllerEndpoint) -> Arc<dyn MihomoConnectionOps> {
+            Arc::new(FakeConnectionOps::default())
         }
 
         fn configs(&self, _paths: &DataPaths) -> Arc<dyn ConfigRepository> {

@@ -98,10 +98,18 @@ external-controller-cors:
 | 启停/重启/reload Mihomo | ✓ | ✓（自身子进程） | ✓（经 Agent） | ✓ | — |
 | 写/激活/回滚配置 | ✓ | ✓ | ✓ | ✓ | — |
 | 更新内核二进制 | ✓ | **需要特权路径**（见 D5） | ✓（经 Agent） | ✓ | — |
+| 查看连接列表（含 `uid`/`process`/`processPath`） | ✓ | ✓ | ✓ | ✓ | **—**（见下） |
+| 查看连接列表（脱敏） | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 关闭连接 | ✓ | ✓ | ✓ | ✓ | — |
 | 应用防火墙规则 | ✓ | 需 `CAP_NET_ADMIN`（MVP 不做 apply） | — | — | — |
 | 修改用户/组/unit | ✓ | — | — | — | — |
 
-- **不需要 root 的能力**：配置版本化、订阅管理、状态查询、Doctor（只读探测）。
+- **连接列表的行是新权限面（2026-09-12）**：`/connections` 的 `metadata` 含 `uid`、`process`、
+`processPath`，三者合起来回答「本机哪个程序访问了什么」——比状态查询敏感得多，故**只对 ADMIN 返回**。
+脱敏是**不可配置**的角色规则（ADR-003 D8）：可配置化会多一个误配的入口，而默认关闭时运维会困惑
+「为什么字段是空的」。关闭连接记审计（`connection.close`），因为中断他人传输是可追溯的运维行为。
+
+**不需要 root 的能力**：配置版本化、订阅管理、状态查询、Doctor（只读探测）。
 - **需要 `CAP_NET_ADMIN`**：TUN 创建、nftables/策略路由写入、`ip` 操作（R10 §1）。
 - **不引入 `sudo`**（R09 C7）：需要 systemd 操作时走 D-Bus + 窄化 polkit rule，或 Agent 以 root 运行并用 `SystemCallFilter=` 兜底。
 

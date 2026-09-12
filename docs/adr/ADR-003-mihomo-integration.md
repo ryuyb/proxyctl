@@ -199,6 +199,41 @@ URL 其余部分完整。
 
 **观测不进状态机**（D1 的既有结论）：流断开不产生 `last_failure`、不触发回滚、不写审计。
 
+### D8. `MihomoConnectionOps` 的实现形态（2026-09-12）
+
+**实现状态：`KernelConnections` 已实现并接线**（`crates/infrastructure/src/mihomo/connections.rs`）。
+原 `UnavailableConnections` 占位已删除。
+
+**用快照，不用流。** `/connections` 支持 `?interval=` 推送，但「列出当前连接」是一个有答案的问题，
+不是订阅：用流会让每个调用方读一帧就丢弃，并为一次已完成的操作保持连接。
+
+**`close_connection` 返回 `CloseOutcome`，不返回 `()`。** 实测：`DELETE /connections/:id`
+对**不存在的 id 也返回 204**。因此「已关闭」与「本来就不存在」**无法区分**，API 若声称知道就是在编造。
+原 port 文档写的「unknown id → `InvalidResponse`」是**做不到的承诺**，已删除。
+`close_all` 返回值改为实测的连接数（请求前后各读一次列表取差值），因为内核不报数，
+而只有「已全部关闭」的审计记录价值极低。
+
+**隐私按角色裁剪，用显式函数而非「字段没填」。** `ConnectionView::redact_for(role)` 是必须被调用的
+转换：若只靠不填充字段来隐藏，将来新增 `uid` 消费点时不会有任何提示还有权限这回事。
+ADMIN 见全部；其他角色丢失 `uid`/`process`/`processPath`——这三者合起来回答「本机哪个程序访问了什么」，
+不是他们的权限。**不可配置**（角色决定，少一个旋钮少一种误配）。
+
+**`close_all` 需要二次确认**（body 带 `{"confirm": true}`，CLI 侧 `--yes`）。
+它是唯一「一个请求影响全部连接」的端点，误调的后果是中断所有用户的传输。
+
+**空串一律归一化为 `None`。** 内核用空串表示「不适用」或「读不到」——`rule: ""` 是未命中规则，
+`process: ""` 是读不到进程（实测：无 `CAP_NET_ADMIN` 时 `uid=0`、`process`/`processPath` 均为空）。
+在边界归一化一次，消费方不必各自判断。
+
+**`start` 是 RFC 3339 带偏移量，必须应用偏移。** 实测 `2026-09-12T21:40:03.325015696+08:00`；
+忽略偏移会让每个时间戳静默偏移一个时区，而值看起来仍然合理——这是最难发现的一类错误。
+
+**审计写入必须与读取对称。** `AuditAction::ConnectionClose` 与 `AuditTarget::Connection` 加入时，
+写入路径加了而读取路径（`from_label` / `from_parts`）漏了，导致记录**写得进去、读不出来**，
+整个审计列表报 500。已补，并加了双向 round-trip 测试覆盖**每个** action 与 target 变体。
+连接 id 是内核生成的 UUID 而非凭据，可安全入库；target 的重建**不做格式校验**，
+因为该格式不是本 Agent 定义的，不能因为内核改了格式就判定记录不可读。
+
 ---
 
 ## 3. Alternatives

@@ -757,6 +757,155 @@ impl Command for Audit {
     }
 }
 
+/// `connections` — the kernel's live connections.
+#[derive(Debug, Clone)]
+pub struct Connections;
+
+impl Command for Connections {
+    fn request(&self) -> Request {
+        Request::get(format!("{API_PREFIX}/connections"))
+    }
+
+    fn render(&self, response: &Response) -> Result<String, Exit> {
+        let value = as_object(&response.body)?;
+        let items = value
+            .get("connections")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if items.is_empty() {
+            return Ok("no active connections".to_owned());
+        }
+
+        let mut lines = Vec::with_capacity(items.len() + 3);
+        // Totals first: they answer "is anything happening at all" before the
+        // reader scans individual rows.
+        lines.push(format!(
+            "up {}  down {}  ({} active)",
+            human_bytes(
+                value
+                    .get("upload_total")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            ),
+            human_bytes(
+                value
+                    .get("download_total")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            ),
+            items.len()
+        ));
+        lines.push(String::new());
+
+        for item in &items {
+            let chains = item
+                .get("chains")
+                .and_then(|v| v.as_array())
+                .map(|links| {
+                    links
+                        .iter()
+                        .filter_map(|l| l.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                })
+                .unwrap_or_default();
+            lines.push(format!(
+                "{} -> {}",
+                field(item, "source"),
+                field(item, "destination")
+            ));
+            lines.push(format!(
+                "  chain  {}",
+                if chains.is_empty() { "-" } else { &chains }
+            ));
+            lines.push(format!(
+                "  bytes  up {} / down {}",
+                human_bytes(item.get("upload").and_then(|v| v.as_u64()).unwrap_or(0)),
+                human_bytes(item.get("download").and_then(|v| v.as_u64()).unwrap_or(0))
+            ));
+            // Process identity is present only for an administrative caller. Its
+            // absence is not worth a line, because the field's absence is already
+            // the whole signal.
+            if let Some(process) = item.get("process").and_then(|v| v.as_str()) {
+                lines.push(format!(
+                    "  proc   {} (uid {})",
+                    process,
+                    item.get("uid").and_then(|v| v.as_u64()).unwrap_or(0)
+                ));
+            }
+            lines.push(format!("  id     {}", field(item, "id")));
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
+/// `connections close <id>` / `connections close --all`.
+#[derive(Debug, Clone)]
+pub struct CloseConnections {
+    /// One connection, or every connection when `None`.
+    pub id: Option<String>,
+}
+
+impl Command for CloseConnections {
+    fn request(&self) -> Request {
+        match &self.id {
+            Some(id) => Request::with_body(
+                "DELETE",
+                format!("{API_PREFIX}/connections/{id}"),
+                json!({}),
+            ),
+            // The confirmation the server requires, sent because the caller
+            // already confirmed with `--yes`. Both gates exist: this one is the
+            // client's, and the server's is not bypassable by a client that
+            // forgets to send it.
+            None => Request::with_body(
+                "DELETE",
+                format!("{API_PREFIX}/connections"),
+                json!({ "confirm": true }),
+            ),
+        }
+    }
+
+    fn render(&self, response: &Response) -> Result<String, Exit> {
+        let value = as_object(&response.body)?;
+        let outcome = field(&value, "outcome");
+        let closed = value.get("closed").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        let mut text = match &self.id {
+            Some(id) => format!("{outcome}: close requested for {id}"),
+            None => format!("{outcome}: closed {closed} connection(s)"),
+        };
+        // A degradation means the action happened but something about reporting it
+        // did not. Saying so is the point: the caller must not conclude the record
+        // was written.
+        if let Some(note) = value.get("degradation").and_then(|v| v.as_str()) {
+            text.push_str(&format!("\nnote: {note}"));
+        }
+        Ok(text)
+    }
+}
+
+/// Renders a byte count for a human.
+///
+/// Connection totals reach gigabytes, where a raw number is unreadable and the
+/// exact value is not what the reader wants.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 /// `logs` — the kernel's log stream.
 ///
 /// # Not a [`Command`]
@@ -1215,6 +1364,142 @@ mod tests {
         );
         assert_eq!(Doctor.render(&response), Err(Exit::Failure));
         assert_eq!(Jobs { id: None }.render(&response), Err(Exit::Failure));
+    }
+
+    /// The close-all request must carry the confirmation the server requires, or
+    /// the client would be unable to perform the operation it advertises.
+    #[test]
+    fn closing_all_sends_the_confirmation() {
+        let request = CloseConnections { id: None }.request();
+        assert_eq!(request.method, "DELETE");
+        assert_eq!(request.path, "/api/v1/connections");
+        assert_eq!(
+            request.body,
+            Some(serde_json::json!({ "confirm": true })),
+            "the server refuses a bulk close without this"
+        );
+    }
+
+    #[test]
+    fn closing_one_addresses_that_connection() {
+        let request = CloseConnections {
+            id: Some("abc".to_owned()),
+        }
+        .request();
+        assert_eq!(request.method, "DELETE");
+        assert_eq!(request.path, "/api/v1/connections/abc");
+    }
+
+    /// The list form is a GET on the same path the bulk close uses with DELETE, so
+    /// the method is what distinguishes them.
+    #[test]
+    fn listing_connections_is_a_get() {
+        let request = Connections.request();
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/api/v1/connections");
+    }
+
+    #[test]
+    fn a_connection_list_shows_the_chain_and_the_totals() {
+        let response = ok(serde_json::json!({
+            "upload_total": 2048,
+            "download_total": 3_145_728,
+            "connections": [{
+                "id": "c1",
+                "source": "127.0.0.1:51844",
+                "destination": "example.com:443",
+                "chains": ["Proxy", "Node A"],
+                "upload": 79,
+                "download": 15116,
+                "rule": "DomainSuffix",
+                "rule_payload": "example.com",
+                "uid": 1000,
+                "process": "curl",
+                "process_path": "/usr/bin/curl",
+                "inbound": "DEFAULT-MIXED",
+                "started_at": 1789220403
+            }]
+        }));
+        let text = Connections.render(&response).expect("render");
+        assert!(
+            text.contains("127.0.0.1:51844 -> example.com:443"),
+            "{text}"
+        );
+        assert!(text.contains("Proxy -> Node A"), "{text}");
+        assert!(text.contains("curl"), "{text}");
+        assert!(
+            text.contains("2.0 KiB"),
+            "totals must be human-sized: {text}"
+        );
+        assert!(text.contains("3.0 MiB"), "{text}");
+    }
+
+    /// A non-administrative caller receives no process identity, and the renderer
+    /// must not invent a line for it.
+    #[test]
+    fn a_list_without_process_identity_omits_that_line() {
+        let response = ok(serde_json::json!({
+            "upload_total": 0,
+            "download_total": 0,
+            "connections": [{
+                "id": "c1",
+                "source": "127.0.0.1:1",
+                "destination": "example.com:443",
+                "chains": ["DIRECT"],
+                "upload": 0,
+                "download": 0,
+                "uid": null,
+                "process": null,
+                "process_path": null,
+                "started_at": null,
+                "rule": null,
+                "rule_payload": null,
+                "inbound": null
+            }]
+        }));
+        let text = Connections.render(&response).expect("render");
+        assert!(!text.contains("proc"), "no process line expected: {text}");
+        assert!(text.contains("example.com:443"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_connection_list_says_so() {
+        let response = ok(serde_json::json!({
+            "upload_total": 0,
+            "download_total": 0,
+            "connections": []
+        }));
+        assert_eq!(
+            Connections.render(&response).expect("render"),
+            "no active connections"
+        );
+    }
+
+    /// A degradation must be surfaced: the action happened, but the record of it
+    /// may not have been written, and the caller has to know that.
+    #[test]
+    fn a_close_reports_a_degradation() {
+        let response = ok(serde_json::json!({
+            "outcome": "accepted",
+            "closed": 1,
+            "degradation": "the audit record could not be written"
+        }));
+        let text = CloseConnections {
+            id: Some("abc".to_owned()),
+        }
+        .render(&response)
+        .expect("render");
+        assert!(text.contains("accepted"), "{text}");
+        assert!(text.contains("audit record could not be written"), "{text}");
+    }
+
+    #[test]
+    fn byte_counts_are_human_sized() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024), "1.0 GiB");
     }
 
     #[test]
