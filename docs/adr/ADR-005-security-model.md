@@ -120,9 +120,21 @@ external-controller-cors:
 
 订阅 URL 由用户提供，抓取可能由 Agent 或（更常见）Sub-Store 发起：
 
-- Agent 侧（NativeConverter 直连）：必须拒绝环回、链路本地、元数据地址（`169.254.169.254`、`::1`）、RFC1918（除非显式白名单）。
-- Sub-Store 侧：Agent **无法控制其出站** → 必须文档化该风险，并要求 Sub-Store 只绑 loopback + 依赖主机防火墙；在 MVP 中把"订阅 URL 指向内网"作为**用户自担风险**并给出告警。
-- 关联 open-questions Q012（是否要求所有抓取都经 Agent）。
+**实现状态（2026-09-12）：已实现并接线。** 详见 open-questions Q012。
+
+- **判定（原本已存在，但未被调用）**：拒绝环回、链路本地、云元数据、RFC1918、CGNAT、
+  基准测试段、IPv6 唯一本地、IPv4-mapped IPv6、本地主机名后缀。
+  ⚠️ 该判定**曾是死代码**——`is_public_destination()` 全仓库无调用者，
+  实测 `169.254.169.254` 与 `127.0.0.1` 均可通过。**"写了守卫"不等于"守卫生效"。**
+- **策略**：`SubscriptionFetchPolicy`，**默认拒绝（公网白名单语义）**，可配 host/CIDR 白名单。
+  放在**用例层**而非 `SubscriptionUrl::parse`：内网地址是合法 URL，类型必须能表示它
+  （doctor 要报告、测试要构造）。非法白名单条目**启动即拒**，不静默丢弃。
+- **强制点**：`UpdateSubscription` 在调用 converter **之前**。这是 Agent 还能决定的最后位置。
+- **Sub-Store 侧仍不可控**：`convert` 把 URL 交给后端，抓取由它发起。Agent **只能**在选 URL 时拒绝
+  并文档化；要求后端只绑 loopback + 依赖主机防火墙。
+- **残余风险（未解决）**：判定为纯字符串/IP，**无 DNS 解析**（保纯函数、避免 TOCTOU），
+  故"域名解析到内网"与 DNS rebinding 当前不拦。归属：未来的 fetch 层。
+- 关联 open-questions **Q012（已 `RESOLVED`）**。
 
 ### D7. 日志与审计脱敏（强制）
 
