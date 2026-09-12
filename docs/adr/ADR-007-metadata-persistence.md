@@ -85,6 +85,35 @@
 
 ---
 
+### D4. 配置正文存文件系统，元数据存 SQLite（批次 B 落实）
+
+| 数据 | 位置 | 理由 |
+|---|---|---|
+| 配置正文 | `configs_dir/vNNN.yaml` | 需要文件语义：原子替换、checksum 校验、直接 diff |
+| 版本元数据 | `config_versions` 表 | 可查询、可排序、与激活指针同库 |
+| 激活指针 | `config_active` 表 | **同库内一次事务切换**，避免与版本元数据产生"两份真相" |
+| 订阅定义 | `subscriptions` 表 | 含 URL 凭据，库文件 `0600` |
+| 凭据 | `secrets` / `api_principals` 表 | 同上 |
+
+正文写入 = **同目录临时文件 + `fsync` + `rename`**（实测确认同目录 `persist()` 为原子 rename）。
+
+### D5. 激活指针必须被交叉校验，不得盲信
+
+`active()` 每次都要三向核对：指针里的 checksum ↔ 版本记录里的 checksum ↔ 磁盘正文的实际 checksum。
+任一不一致**报错**，不静默修复。理由：回滚要"重新驱动上一个版本"，而**它必须先知道上一个版本是哪个**——
+如果指针可以自相矛盾，这个前提就不成立。
+
+### D6. 凭据：空 secret 双向拒绝
+
+- **不存**空值；
+- 读到空值也**不返回**，而是报错。
+
+依据 ADR-005 R1：上游仅在 `secret != ""` 时才安装认证中间件，所以返回空 secret 等于交出一个
+**接受未鉴权控制请求的内核**。这个"双向"不是冗余——单向只防住写入路径。
+
+**有意推迟**：API token 以原值存储而非加盐哈希。理由已写入代码与本节：token 是 32 字节随机值而非
+人类口令，离线穷举不可行，且库文件为 `0600`；KDF 属多用户 Web 里程碑。这是**显式推迟**，不是遗漏。
+
 ## 4. Consequences
 
 **正面**
@@ -113,4 +142,13 @@
 - 真机验证（Debian aarch64，OrbStack）：`proxy-infrastructure` **56 个 storage 测试全部通过**，含 WAL、并发访问、重开持久性、保留上限；同时 14 个内核集成测试保持通过。
 - 领域纯度：`cargo tree -p proxy-domain --depth 1` → 仅 `thiserror`。
 - 依赖方向：`crates/application/src/` 中无 `rusqlite`/`reqwest`/`sqlx` 实现依赖（架构守卫测试通过）。
-- 测试总量：workspace **438 passed / 0 failed**（批次 A 前为 359）。
+- 测试总量：workspace **518 passed / 0 failed**（批次 A 后为 438，批次 B 前为 359）。
+- 批次 B 真机验证（Debian aarch64）：**527 passed / 0 failed**，含 123 个 storage 测试与 14 个内核集成测试。
+
+### 5.1 实施中发现并修复的真实缺陷
+
+| 缺陷 | 后果 | 修复 |
+|---|---|---|
+| `save` 先写正文、失败再删 | 被拒绝的重写会**删掉既有版本的正文字**（数据丢失） | 先判定可否写入，再落盘正文 |
+| 激活查询用 `COALESCE(activated_at, '')` | SQLite 将该列报为 TEXT，列中一旦是整数则**每次读取都失败** | 去掉 COALESCE，单独取列 |
+| 迁移传输夹带 macOS `._*` 文件 | 架构守卫读取每个 `.rs` 文件，遇到非 UTF-8 即失败（**传输问题，非代码问题**） | `COPYFILE_DISABLE=1` 重新打包 |
