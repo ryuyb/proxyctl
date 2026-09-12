@@ -1,0 +1,7 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Local toolchain cache used when the global CARGO_HOME is not writable
+/.cargo/

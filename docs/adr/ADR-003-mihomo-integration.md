@@ -1,0 +1,186 @@
+# ADR-003 — Mihomo 集成与进程管理
+
+| 字段 | 值 |
+|---|---|
+| Status | Accepted（Phase 0 定稿） |
+| Date | 2026-09-12 |
+| Related | ADR-001、ADR-004、ADR-005、`docs/research/01-mihomo.md`、`03-mihomo-runtime.md`、`09-linux-runtime.md` |
+
+---
+
+## 1. Context
+
+Agent 是控制平面，Mihomo 是数据平面。需要在"直接调用 Mihomo API"与"自己实现"之间划出边界，并决定进程管理、控制通道与就绪判定方式。
+
+### 1.1 关键实测结论
+
+| # | 结论 | 证据 |
+|---|---|---|
+| C1 | 实测版本 `v1.19.30`；`/version` 返回 `{"meta":true,...}`，可据此识别 Meta 内核 | R01 §1 |
+| C2 | route 清单与 tag-pinned 源码逐条吻合（~45 条）；**`/script`、`/profile` 不存在**（404，属误传） | R01 §1 |
+| C3 | 设了 `secret` 时 TCP controller **所有** route 都要求 `Authorization: Bearer`（含 `/version`） | R01 §1 |
+| C4 | **Unix socket 完全不校验 `secret`**：`startUnix()` 传入 `router(cfg.IsDebug, "", ...)`，且 socket 被硬编码 `chmod 0666` | R01 §1、R12 §1、R09 C8（三方独立确认） |
+| C5 | **`/restart` 是 `syscall.Exec` 进程自替换**（PID 不变、绕过 Agent 状态机）；返回值与文档所称 `204` 不符 | R01 §1 |
+| C6 | **`/upgrade` 不可依赖**：无更新时返回 500（把"已是最新"当错误）、无签名校验、`force=true` 有替换成半截二进制的风险 | R01 §1 |
+| C7 | `PUT /configs` **先解析后应用**：非法 YAML → 400 且实例不受影响（旧配置继续生效）；**空 body 会 400，必须发 `{}`**；`path` 受 SAFE_PATHS 白名单约束 | R01 §1 |
+| C7b | **⚠️ reload 不是事务性的**：解析通过但 listener 绑定失败时，`ApplyConfig` 无返回值、不回滚、HTTP 仍 204。`force=false` 安全降级；**`force=true` 会拆除旧监听器留下 `mixed-port: 0` 僵尸态，后续 reload 不可恢复 → 必须禁止 `force=true`** | R02 §1 C5/C6（实测） |
+| C8 | `GET /configs` 仅 33 字段，**不含** `dns`/`proxies`/`rules`/`providers` → 不能当作完整配置真相 | R01 §1 |
+| C9 | `/traffic`、`/memory`、`/connections`、`/logs` 是 **NDJSON + WebSocket 双模** | R01 §1 |
+| C10 | `/configs/geo`、`/upgrade/geo` 是 **fire-and-forget**（204 不代表成功） | R01 §1 |
+| C11 | **listener bind 失败不致命**：仅记 error 日志，`/version` 仍返回 200，但代理端口可能没起来 | R01 §1 |
+| C12 | reload 失败是**失败安全**的（SIGHUP 与 API reload 均保留旧配置） | R03 §5、R01 C7 |
+| C13 | **Mihomo 不支持 `sd_notify`**；上游官方 unit 用 `Type=simple` + SIGHUP reload | R09 C5 |
+| C14 | 容器内常常**没有 systemd**（`/proc/1/comm=sh`）→ 进程管理必须能回退 | R10 §1 |
+| C15 | 内核进程崩溃后重启需退避；systemd `Restart=` 与 Agent 自身重启策略不得双重决策 | R09、R03 |
+| C16 | **Mihomo 自带的 legacy iptables 自动化是反面教材**（写全局 PREROUTING/OUTPUT、硬编码 `172.17.0.0/16`、失败 `os.Exit(2)`），绝不可复用 | R11 C9 |
+
+### 1.2 需求约束
+
+REQ-MIHOMO-001~012：启动/停止/重启/reload、崩溃检测、串行化、版本管理、**内核更新与配置更新分离**、日志脱敏、就绪不得靠 sleep。
+
+---
+
+## 2. Decision
+
+### D1. 拆成三个聚焦 Port（不写巨型 `SystemManager`）
+
+```rust
+// 命令面：有副作用，需要串行化
+#[async_trait]
+pub trait MihomoController: Send + Sync {
+    async fn version(&self) -> Result<MihomoVersion>;
+    async fn runtime_config(&self) -> Result<RuntimeConfigSummary>;
+    async fn reload(&self, config: &ConfigPath) -> Result<()>;   // PUT /configs {path}
+    async fn proxies(&self) -> Result<ProxyList>;
+    async fn select_proxy(&self, group: &str, proxy: &str) -> Result<()>;
+    async fn test_delay(&self, name: &str, opts: DelayOptions) -> Result<DelayOutcome>;
+    async fn rules(&self) -> Result<RuleList>;
+    async fn health_check(&self) -> Result<HealthReport>;
+}
+
+// 观测面：只读流，不参与状态机
+#[async_trait]
+pub trait MihomoObserver: Send + Sync {
+    async fn traffic(&self) -> Result<TrafficStream>;      // NDJSON 或 WS
+    async fn logs(&self, level: LogLevel) -> Result<LogStream>;
+    async fn memory(&self) -> Result<MemoryStream>;
+}
+
+// 连接运维：低耦合、隐私敏感
+#[async_trait]
+pub trait MihomoConnectionOps: Send + Sync {
+    async fn connections(&self) -> Result<ConnectionList>;
+    async fn close_connection(&self, id: &str) -> Result<()>;
+    async fn close_all(&self) -> Result<()>;
+}
+
+// 生命周期权威
+#[async_trait]
+pub trait ProcessManager: Send + Sync {
+    async fn start(&self, opts: StartOptions) -> Result<ProcessHandle>;
+    async fn stop(&self, timeout: Duration) -> Result<ExitStatus>;
+    async fn status(&self) -> Result<ProcessStatus>;
+    async fn signal(&self, sig: Signal) -> Result<()>;
+}
+```
+
+**拆三个的理由**：观测面与命令面的失败语义完全不同（流断开不应影响生命周期状态）；连接明细含 `uid`/`process`/`processPath` 隐私字段（C9/R01），需要独立的访问控制与"不进 Domain"的边界。
+
+### D2. 生命周期权威 = `ProcessManager`；**禁止**依赖 `/restart` 与 `/upgrade`
+
+- `/restart`（C5）绕过状态机、PID 不变、状态全丢 → **禁止调用**。
+- `/upgrade`（C6）语义不可靠 → **Agent 自研"下载 + 校验 + 原子替换 + 健康检查 + 回滚"**（与 ADR-004 的配置链路对称）。
+- reload 用 **`PUT /configs` 带 JSON body**（有 HTTP 错误反馈），**不用 SIGHUP**（无反馈）；**禁止 `force=true`**（C7b，ADR-004 D3）。
+
+### D3. 控制通道：MVP 优先 Unix socket，但必须补权限
+
+```text
+external-controller-unix: /run/proxy-agent/mihomo.sock
+```
+
+- 上游硬编码 `chmod 0666` 且不校验 secret（C4）→ Agent **必须在 socket 创建后收紧权限**（`chmod 0660` + 专用 group），并把 `/run/proxy-agent` 建成 `0750`。
+- **绝不**把 Mihomo controller 绑到 `0.0.0.0`；TCP 模式必须设非空 `secret` 且只绑 loopback（ADR-005）。
+- 该 socket 权限收紧必须纳入 health check（REQ-SEC-002）。
+
+### D4. 进程模型：Agent 作为 supervisor，systemd 管 Agent
+
+- **单 unit**：systemd 只管理 `proxy-agent.service`，Mihomo 是 Agent 的 fork/exec 子进程、同用户、靠 ambient capability 传递所需权限（详见 ADR-005 / R09）。
+- **无 systemd 环境**（部分 LXC/容器，C14）回退 `SupervisedChildProcess` 适配器；Application 不得假设 systemd 存在。
+- **重启分工**：MVP 由 Agent 做退避重启，`proxy-agent.service` 用 `Restart=on-failure` 兜底；**Mihomo 子进程不由 systemd 单独 restart**（避免双重决策，C15）。
+
+### D5. 就绪与健康检查分层（不得靠 sleep）
+
+```text
+L1 进程存活      → pid 存在 / 子进程未退出
+L2 Controller 可达 → GET /version 200（含 secret 校验成功）
+L3 配置已加载    → GET /configs 的 mode/ports 与期望一致（注意 C8：字段有限）
+L4 代理端口监听  → TCP connect 到 mixed-port（这是 C11 的兜底：bind 失败时 /version 仍 200）
+L5 可选数据面    → delay 测试（需显式触发，默认关闭以免产生真实流量）
+```
+
+状态：`Healthy` / `Degraded`（L2 通但 L4 不通等）/ `Unhealthy`。
+
+> **实测依据**：L4 不可省略。Mihomo 在 listener bind 失败时**不致命**（仅 error 日志、`/version` 仍 200）——"进程存活 + controller 200" 可能是**僵尸态**（R01 C11、R02 §1 C5）。
+
+### D6. Domain 边界：哪些**不进** Domain
+
+| 不进 Domain | 去处 |
+|---|---|
+| 连接明细（`uid`/`process`/`processPath`） | Adapter DTO / 事件流（隐私敏感） |
+| 逐秒 traffic 采样、memory | 事件流 |
+| 日志原文 | 事件流（脱敏后） |
+| `/storage` KV、`/dns/query` 结果 | Adapter |
+| `test_delay` 的 504 | **业务结果** `DelayOutcome::Timeout`，不是基础设施错误 |
+
+---
+
+## 3. Alternatives
+
+| 方案 | 拒绝理由 |
+|---|---|
+| 用 `/restart` 做重启 | C5：`syscall.Exec` 自替换，绕过状态机、丢失 Agent 侧状态 |
+| 用 `/upgrade` 做内核更新 | C6：错误语义、无签名校验、半截二进制风险 |
+| 单一巨型 `MihomoPort`（~40 方法） | 违反 AGENTS.md"Port 小而聚焦"；观测/命令/连接失败语义不同 |
+| SIGHUP 做 reload | 无错误反馈（R01/R03），失败不可观测 |
+| Agent 不做 supervisor，交给 systemd 管 mihomo | 容器内无 systemd（C14）；且会引入双 supervisor/双 unit 复杂度（R09 C2/C3） |
+| 复用 Mihomo 自带 iptables 自动化 | C16：全局规则污染 + 失败即退出 |
+
+---
+
+## 4. Consequences
+
+### 4.1 正面
+
+- 生命周期只有一个权威（可测试、可串行化、非法转换可拒绝）。
+- 观测面断开不影响数据面状态判定。
+- 内核更新与配置更新彻底解耦（REQ-MIHOMO-007）。
+- 无 systemd 环境可降级运行（PVE LXC 常见）。
+
+### 4.2 负面 / 成本
+
+- Agent 需自研内核更新链路（下载/校验/替换/回滚），工作量转移到我方。
+- 需要处理 socket 权限收紧时序（Mihomo 创建 socket 后 Agent 立即 chmod，存在短暂窗口）。
+- L4 健康检查需要额外端口探测逻辑（C11 才不会被漏掉）。
+
+### 4.3 必须遵守
+
+```text
+1. 禁止依赖 /restart 与 /upgrade（REQ-MIHOMO-007/009/011）
+2. unix socket 必须收紧为 0660（REQ-SEC-002）
+3. TCP controller 必须 secret 非空 + 仅 loopback（REQ-SEC-001/003）
+4. reload 必须用 PUT /configs 带 JSON body；**禁止 force=true**；204 不代表生效
+5. 生命周期操作按实例串行化；非法转换直接拒绝（REQ-MIHOMO-005）
+6. 就绪判定必须基于 API 可达或可解析日志行，禁止 sleep（REQ-MIHOMO-011）
+7. 健康检查必须含代理端口可达性，不得以"进程存活 + controller 200"判成功
+```
+
+---
+
+## 5. Evidence
+
+- `docs/research/01-mihomo.md` §1/§3–§8（route 清单、鉴权、reload 语义、流式接口、`/restart`/`/upgrade` 实测）
+- `docs/research/03-mihomo-runtime.md`（信号语义、就绪耗时、unix socket、崩溃与端口）
+- `docs/research/09-linux-runtime.md` C3/C5/C8（ambient cap、无 `sd_notify`、socket 权限边界、单 unit 决策）
+- `docs/research/10-pve-lxc.md` §1 C1–C2（TUN 判定、容器内无 systemd）
+- `docs/research/11-network-stack.md` C9（Mihomo legacy iptables 反面教材）
+- `docs/research/12-security.md` §1（secret 空值/CORS 默认值/`":9090"` 全网卡）
