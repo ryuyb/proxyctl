@@ -1,0 +1,21 @@
+[package]
+name = "proxy-domain"
+description = "Pure domain model for the Mihomo management agent (no IO, no async, no framework deps)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "proxy_domain"
+path = "src/lib.rs"
+
+# Domain purity is enforced here: no tokio, no reqwest, no sqlx, no async-trait,
+# no filesystem/process crates. Only structured error definitions.
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
