@@ -73,6 +73,7 @@ use proxy_domain::subscription::ConvertedProxies;
 use proxy_domain::system::environment::InitSystem;
 use proxy_infrastructure::events::BroadcastEventPublisher;
 use proxy_infrastructure::kernel::GithubKernelInstaller;
+use proxy_infrastructure::mihomo::observer::KernelObserver;
 use proxy_infrastructure::mihomo::{HttpMihomoController, LoopbackTransport, UnixSocketTransport};
 use proxy_infrastructure::process::SupervisedChildProcess;
 use proxy_infrastructure::storage::SqlitePool;
@@ -250,26 +251,27 @@ impl KernelInstaller for UnusableInstaller {
     }
 }
 
-/// The observation streams, which have no adapter yet.
-#[derive(Debug, Clone, Copy)]
-struct UnavailableObserver;
-
-/// Why the observation streams are absent, stated once.
-const OBSERVER_REASON: &str = "the observation streams need the websocket transport, which is being built alongside the \
-     interface layer that consumes them";
+/// An observer whose transport could not be created.
+///
+/// Reported on use rather than at composition, for the same reason as
+/// `UnusableController`: a bad endpoint should not stop the agent from starting
+/// and explaining itself.
+struct UnusableObserver {
+    reason: String,
+}
 
 #[async_trait]
-impl MihomoObserver for UnavailableObserver {
+impl MihomoObserver for UnusableObserver {
     async fn traffic(&self) -> Result<BoxStream<TrafficSample>, PortError> {
-        Err(unimplemented("MihomoObserver", OBSERVER_REASON))
+        Err(PortError::Transport(self.reason.clone()))
     }
 
     async fn logs(&self, _level: LogLevel) -> Result<BoxStream<LogEntry>, PortError> {
-        Err(unimplemented("MihomoObserver", OBSERVER_REASON))
+        Err(PortError::Transport(self.reason.clone()))
     }
 
     async fn memory(&self) -> Result<BoxStream<MemorySample>, PortError> {
-        Err(unimplemented("MihomoObserver", OBSERVER_REASON))
+        Err(PortError::Transport(self.reason.clone()))
     }
 }
 
@@ -405,8 +407,32 @@ impl AdapterFactory for RealFactory {
         Arc::new(SupervisedChildProcess::new())
     }
 
-    fn observer(&self) -> Arc<dyn MihomoObserver> {
-        Arc::new(UnavailableObserver)
+    fn observer(&self, endpoint: &ControllerEndpoint) -> Arc<dyn MihomoObserver> {
+        // The same endpoint the controller uses, so both sides of the composition
+        // observe and command one kernel.
+        //
+        // The controller secret is handed over as a known value because it can
+        // appear bare in a log line, where no URL structure marks it.
+        let secrets: Vec<String> = self.mihomo_secret.clone().into_iter().collect();
+        match endpoint {
+            ControllerEndpoint::UnixSocket(path) => {
+                match UnixSocketTransport::new(path.clone(), CONTROLLER_TIMEOUT) {
+                    Ok(transport) => Arc::new(KernelObserver::new(transport, secrets)),
+                    Err(e) => Arc::new(UnusableObserver {
+                        reason: format!("the unix socket transport could not be created: {e}"),
+                    }),
+                }
+            }
+            ControllerEndpoint::Loopback { address } => {
+                let secret = self.mihomo_secret.clone().unwrap_or_default();
+                match LoopbackTransport::new(address, &secret, CONTROLLER_TIMEOUT) {
+                    Ok(transport) => Arc::new(KernelObserver::new(transport, secrets)),
+                    Err(e) => Arc::new(UnusableObserver {
+                        reason: format!("the loopback transport could not be created: {e}"),
+                    }),
+                }
+            }
+        }
     }
 
     fn connections(&self) -> Arc<dyn MihomoConnectionOps> {
@@ -566,7 +592,7 @@ mod tests {
         // the signature, and a panicking constructor would fail here.
         let _ = factory.controller(&config.controller);
         let _ = factory.process(InitSystem::Systemd);
-        let _ = factory.observer();
+        let _ = factory.observer(&config.controller);
         let _ = factory.connections();
         let _ = factory.configs(&config.paths);
         let _ = factory.validator();
@@ -589,12 +615,28 @@ mod tests {
         let config = RuntimeConfig::rooted_at(instance(), dir.path().display().to_string());
         let factory = RealFactory::new(pool, &config, None).expect("factory");
 
-        let observer = factory.observer();
+        // The observer now has an adapter, so it no longer reports "unimplemented".
+        // It reports what is actually true of this composition: nothing is
+        // listening on the controller socket, so the observation stream cannot be
+        // opened. The distinction is the point — an operator must be able to tell
+        // "not built yet" from "the kernel is not running".
+        //
         // `BoxStream` is not `Debug`, so the result is matched rather than
         // unwrapped through `expect_err`.
+        let observer = factory.observer(&config.controller);
         match observer.logs(LogLevel::Info).await {
-            Err(e) => assert!(e.to_string().contains("MihomoObserver"), "{e}"),
-            Ok(_) => panic!("the observer must not supply a stream it does not have"),
+            Err(e) => {
+                let text = e.to_string();
+                assert!(
+                    !text.contains("unimplemented") && !text.contains("websocket"),
+                    "the observer must not claim to be unimplemented: {text}"
+                );
+                assert!(
+                    matches!(e, PortError::Unreachable(_) | PortError::Transport(_)),
+                    "expected a transport-level failure, got {text}"
+                );
+            }
+            Ok(_) => panic!("nothing is listening, so no stream can be opened"),
         }
 
         let connections = factory.connections();

@@ -96,7 +96,10 @@ async fn environment_probe_failure_is_reported() {
         fn process(&self, _init: InitSystem) -> Arc<dyn proxy_application::ports::ProcessManager> {
             Arc::new(proxy_application::test_support::FakeProcessManager::default())
         }
-        fn observer(&self) -> Arc<dyn proxy_application::ports::MihomoObserver> {
+        fn observer(
+            &self,
+            _endpoint: &proxy_bootstrap::ControllerEndpoint,
+        ) -> Arc<dyn proxy_application::ports::MihomoObserver> {
             Arc::new(proxy_application::test_support::FakeObserver)
         }
         fn connections(&self) -> Arc<dyn proxy_application::ports::MihomoConnectionOps> {

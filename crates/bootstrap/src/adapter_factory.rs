@@ -43,8 +43,14 @@ pub trait AdapterFactory: Send + Sync {
     /// implementation must do.
     fn process(&self, init: InitSystem) -> Arc<dyn ProcessManager>;
 
-    /// Runtime observation streams.
-    fn observer(&self) -> Arc<dyn MihomoObserver>;
+    /// Runtime observation streams for the kernel reached through `endpoint`.
+    ///
+    /// Takes the endpoint for the same reason [`controller`](Self::controller)
+    /// does: the observer reads from the very same kernel, so it must use the same
+    /// transport. An observer with no endpoint would have to guess, and a guess
+    /// that disagreed with the controller would report one kernel's state while
+    /// the controller commanded another.
+    fn observer(&self, endpoint: &ControllerEndpoint) -> Arc<dyn MihomoObserver>;
 
     /// Connection inspection.
     fn connections(&self) -> Arc<dyn MihomoConnectionOps>;
@@ -133,7 +139,7 @@ pub mod in_memory {
             Arc::new(FakeProcessManager::default())
         }
 
-        fn observer(&self) -> Arc<dyn MihomoObserver> {
+        fn observer(&self, _endpoint: &ControllerEndpoint) -> Arc<dyn MihomoObserver> {
             Arc::new(FakeObserver)
         }
 

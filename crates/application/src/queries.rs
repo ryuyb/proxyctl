@@ -277,6 +277,66 @@ impl ListJobs {
     }
 }
 
+/// Opens the kernel's log stream.
+///
+/// # Why this is a query and not just a pass-through
+///
+/// The interface layer must not reach into the context's ports directly, so
+/// something in this layer has to own the translation. What the use case
+/// contributes is the *rule* about failure: an unavailable stream is reported as
+/// an error when it is opened, and a stream that ends later is not an error at
+/// all, because a kernel restarting while someone watches logs is an event to
+/// observe rather than a fault to report.
+///
+/// It deliberately does **not** touch the per-instance lock or write an audit
+/// record, for the reasons in this module's header: observing is not a
+/// state-changing operation, and auditing every `logs -f` would bury the record
+/// that matters.
+pub struct ObserveLogs;
+
+impl ObserveLogs {
+    /// Opens the log stream at `level` or above.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::Port`] when the stream cannot be opened — the
+    /// kernel is not running, or the endpoint is unusable. The level is passed to
+    /// the kernel rather than filtered here, because one implementation of the
+    /// ordering rule is enough.
+    pub async fn execute(
+        ctx: &AppContext,
+        level: crate::ports::types::LogLevel,
+    ) -> Result<
+        crate::ports::mihomo_observer::BoxStream<crate::ports::mihomo_observer::LogEntry>,
+        ApplicationError,
+    > {
+        Ok(ctx.observer.logs(level).await?)
+    }
+}
+
+/// Opens the kernel's traffic stream.
+///
+/// # Errors
+///
+/// As [`ObserveLogs`].
+pub struct ObserveTraffic;
+
+impl ObserveTraffic {
+    /// Opens the traffic stream.
+    ///
+    /// # Errors
+    ///
+    /// As [`ObserveLogs::execute`].
+    pub async fn execute(
+        ctx: &AppContext,
+    ) -> Result<
+        crate::ports::mihomo_observer::BoxStream<crate::ports::mihomo_observer::TrafficSample>,
+        ApplicationError,
+    > {
+        Ok(ctx.observer.traffic().await?)
+    }
+}
+
 /// Reads recent audit records.
 pub struct ListAuditEntries;
 

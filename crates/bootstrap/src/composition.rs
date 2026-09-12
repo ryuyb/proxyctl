@@ -98,13 +98,16 @@ impl Bootstrap {
             .map_err(|e| BootstrapError::Environment(e.to_string()))?;
         let init = environment.init();
 
-        let controller = factory.controller(&Self::resolve_controller(config)?);
+        // Resolved once and shared: the controller and the observer must address
+        // the same kernel, and resolving twice would allow the two to disagree.
+        let endpoint = Self::resolve_controller(config)?;
+        let controller = factory.controller(&endpoint);
         let process = factory.process(init);
 
         let builder = AppContextBuilder::new(config.instance.clone())
             .controller(controller)
             .process(process)
-            .observer(factory.observer())
+            .observer(factory.observer(&endpoint))
             .connections(factory.connections())
             .configs(factory.configs(&config.paths))
             .validator(factory.validator())
