@@ -237,6 +237,9 @@ pub(crate) fn storage_err(reason: impl Into<String>) -> PortError {
     PortError::Storage(reason.into())
 }
 
+pub mod audit;
+pub mod instances;
+pub mod jobs;
 pub mod schema;
 
 #[cfg(test)]
