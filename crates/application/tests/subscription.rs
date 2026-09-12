@@ -572,3 +572,188 @@ async fn start_and_update_can_run_in_sequence() {
 
     assert!(output.succeeded(), "an update after a start should work");
 }
+
+// ------------------------------------------------- SSRF guard (REQ-SUB-009)
+
+/// A subscription whose source points at the hostile destinations the
+/// requirement names must be refused **before anything is fetched**.
+///
+/// The check runs at this layer because the converter hands the URL to an
+/// external service that performs the request: once it has been handed over, the
+/// connection is made by something the agent does not control. Checking the URL is
+/// the only point where the agent can still decide.
+#[tokio::test]
+async fn a_subscription_pointing_inward_is_refused_before_any_fetch() {
+    for target in [
+        // Cloud metadata: the classic credential-theft target.
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:3000/sub",
+        "http://[::1]:3000/sub",
+        "http://10.0.0.1/sub",
+        "http://192.168.1.10/sub",
+        "http://localhost/sub",
+        "http://metadata.google.internal/computeMetadata/v1/",
+    ] {
+        let harness = prepared_harness(FakeConverter::default(), FakeValidator::default()).await;
+        let baseline = establish_baseline(&harness).await;
+
+        // Replace the source with the hostile one.
+        let mut hostile = subscription();
+        hostile = Subscription::reconstitute(proxy_domain::subscription::SubscriptionState {
+            id: hostile.id().clone(),
+            name: hostile.name().to_owned(),
+            source: SubscriptionSource::from_url(target, None).expect("well-formed url"),
+            converter: hostile.converter().clone(),
+            target: hostile.target(),
+            enabled: true,
+            schedule: None,
+            last_update: None,
+        })
+        .expect("valid");
+        harness
+            .ctx
+            .subscriptions
+            .save(&hostile)
+            .await
+            .expect("stored");
+
+        let output = UpdateSubscription::execute(&harness.ctx, input(), NOW)
+            .await
+            .expect("the use case reports rather than errors");
+
+        assert!(
+            !output.succeeded(),
+            "{target} must not be accepted as a destination"
+        );
+        assert!(
+            matches!(output.outcome, UpdateOutcome::Failed(_)),
+            "{target} must produce a failure: {:?}",
+            output.outcome
+        );
+        // The converter must never have been asked to fetch it.
+        assert_eq!(
+            harness_converter_calls(&harness),
+            0,
+            "{target} must be refused before the converter is called"
+        );
+        // And the working configuration is untouched, as with any other failure.
+        assert_eq!(
+            harness
+                .ctx
+                .configs
+                .active(&harness.ctx.instance)
+                .await
+                .expect("active")
+                .map(|v| v.id().clone()),
+            Some(baseline),
+            "a refused destination must leave the active configuration serving"
+        );
+    }
+}
+
+/// The refusal must name the destination and say how to permit it, or an operator
+/// cannot tell a policy refusal from a broken subscription.
+#[tokio::test]
+async fn a_refusal_explains_itself() {
+    let harness = prepared_harness(FakeConverter::default(), FakeValidator::default()).await;
+
+    let mut hostile = subscription();
+    hostile = Subscription::reconstitute(proxy_domain::subscription::SubscriptionState {
+        id: hostile.id().clone(),
+        name: hostile.name().to_owned(),
+        source: SubscriptionSource::from_url("http://169.254.169.254/", None).expect("valid"),
+        converter: hostile.converter().clone(),
+        target: hostile.target(),
+        enabled: true,
+        schedule: None,
+        last_update: None,
+    })
+    .expect("valid");
+    harness
+        .ctx
+        .subscriptions
+        .save(&hostile)
+        .await
+        .expect("stored");
+
+    let output = UpdateSubscription::execute(&harness.ctx, input(), NOW)
+        .await
+        .expect("reports rather than errors");
+
+    let reason = match &output.outcome {
+        UpdateOutcome::Failed(UpdateFailure::Unreachable(reason)) => reason.clone(),
+        other => panic!("expected an unreachable failure, got {other:?}"),
+    };
+    assert!(
+        reason.contains("169.254.169.254"),
+        "the address must appear: {reason}"
+    );
+    assert!(
+        reason.contains("allow-list"),
+        "the refusal must say how to permit it: {reason}"
+    );
+}
+
+/// The legitimate case the policy exists to permit: a source on a network the
+/// operator explicitly allowed.
+#[tokio::test]
+async fn an_allowed_private_destination_is_fetched() {
+    // Assemble with a policy that permits the internal network.
+    let policy =
+        proxy_domain::subscription::SubscriptionFetchPolicy::parse(["10.0.0.0/8"]).expect("valid");
+    let harness = Harness::with_policy(FakeValidator::default(), FakeConverter::default(), policy);
+    harness.with_start_options();
+    harness
+        .ctx
+        .subscriptions
+        .save(&subscription())
+        .await
+        .expect("subscription stored");
+
+    let mut internal = subscription();
+    internal = Subscription::reconstitute(proxy_domain::subscription::SubscriptionState {
+        id: internal.id().clone(),
+        name: internal.name().to_owned(),
+        source: SubscriptionSource::from_url("http://10.1.2.3/sub", None).expect("valid"),
+        converter: internal.converter().clone(),
+        target: internal.target(),
+        enabled: true,
+        schedule: None,
+        last_update: None,
+    })
+    .expect("valid");
+    harness
+        .ctx
+        .subscriptions
+        .save(&internal)
+        .await
+        .expect("stored");
+
+    let output = UpdateSubscription::execute(&harness.ctx, input(), NOW)
+        .await
+        .expect("runs");
+
+    assert!(
+        output.succeeded(),
+        "an explicitly allowed destination must be fetched: {:?}",
+        output.outcome
+    );
+    assert!(
+        harness_converter_calls(&harness) > 0,
+        "the converter must have been called"
+    );
+}
+
+/// A public destination is unaffected by the guard — the common case must not
+/// regress.
+#[tokio::test]
+async fn a_public_destination_is_unaffected() {
+    let harness = prepared_harness(FakeConverter::default(), FakeValidator::default()).await;
+
+    let output = UpdateSubscription::execute(&harness.ctx, input(), NOW)
+        .await
+        .expect("runs");
+
+    assert!(output.succeeded(), "{:?}", output.outcome);
+    assert!(harness_converter_calls(&harness) > 0);
+}

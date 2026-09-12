@@ -175,6 +175,30 @@ impl UpdateSubscription {
             .await);
         }
 
+        // Refuse an outbound destination the policy does not permit, *before*
+        // anything is fetched.
+        //
+        // This has to happen here rather than in the converter: the converter
+        // hands the URL to an external service, which performs the request, so by
+        // the time a converter could object the connection has been made by
+        // something the agent does not control. Checking the URL is the only point
+        // at which the agent can still decide.
+        //
+        // A refused destination is a failure that leaves the active
+        // configuration untouched, like every other failure in this command.
+        if let Some(url) = subscription.source().url()
+            && let Err(refusal) = ctx.fetch_policy.check(url)
+        {
+            return Ok(Self::fail_and_announce(
+                ctx,
+                Some(&mut subscription),
+                &input.id,
+                UpdateFailure::Unreachable(refusal.to_string()),
+                now,
+            )
+            .await);
+        }
+
         // Convert. An empty result arrives as an error, never as an empty node
         // list, so it cannot pass for success.
         let request = ConvertRequest {

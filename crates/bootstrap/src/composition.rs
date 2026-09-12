@@ -24,6 +24,7 @@
 
 use proxy_application::ports::process_manager::StartOptions;
 use proxy_application::{AppContext, AppContextBuilder};
+use proxy_domain::subscription::SubscriptionFetchPolicy;
 use proxy_domain::system::environment::InitSystem;
 use proxy_infrastructure::storage::SqlitePool;
 use proxy_infrastructure::storage::configs::FileConfigRepository;
@@ -129,6 +130,15 @@ impl Bootstrap {
             // boot cannot report why it cannot start the kernel.
             None => builder,
         };
+
+        // The fetch policy is parsed from configuration and fails fast: a
+        // malformed allow-list entry must be reported at startup, not silently
+        // dropped, or the operator would believe a destination is permitted.
+        let policy =
+            SubscriptionFetchPolicy::parse(config.subscription_allow.clone()).map_err(|e| {
+                BootstrapError::InvalidConfig(format!("invalid subscription allow-list: {e}"))
+            })?;
+        let builder = builder.fetch_policy(policy);
 
         let context = builder.build()?;
 

@@ -585,3 +585,48 @@ async fn health_flags_a_non_loopback_backend() {
         other => panic!("expected Misconfigured, got {other:?}"),
     }
 }
+
+/// The converter itself does **not** police the destination, and this test pins
+/// that so the boundary is not mistaken for a guarantee.
+///
+/// It cannot: the URL is handed to the backend, which performs the fetch. By the
+/// time anything here could object, the connection has already been made by a
+/// process the agent does not control. The guard therefore lives where the URL is
+/// *chosen* — the subscription command — and this adapter's job is to carry it.
+///
+/// Asserting the absence of a check is unusual, but the alternative is a future
+/// reader assuming this layer enforces something it cannot.
+#[tokio::test]
+async fn the_converter_does_not_attempt_to_police_the_destination() {
+    let name = registration_name("http://169.254.169.254/");
+    let backend = FakeBackend::default()
+        .with("PATCH", &format!("/api/sub/{name}"), Reply::Status(200))
+        .with(
+            "GET",
+            &format!("/download/{name}"),
+            Reply::Body(200, "proxies:\n  - {\"name\":\"n\"}\n".to_owned()),
+        );
+    let (base, seen, server) = serve(backend).await;
+    let converter = SubStoreConverter::new(&base, false).expect("converter");
+
+    let request = ConvertRequest {
+        source: SubscriptionSource::from_url("http://169.254.169.254/", None).expect("well-formed"),
+        target: TargetFormat::Mihomo,
+        proxy: None,
+        merge_sources: false,
+        cache: CachePolicy::Bypass,
+    };
+
+    // It proceeds: the backend is asked to fetch the metadata address. That is
+    // exactly why the guard must run upstream of here.
+    converter
+        .convert(&request)
+        .await
+        .expect("this layer does not refuse it");
+    let log = seen.lock().expect("lock").clone();
+    assert!(
+        log.iter().any(|r| r.starts_with("PATCH /api/sub/")),
+        "the adapter carries the URL to the backend; it cannot judge it: {log:?}"
+    );
+    server.abort();
+}

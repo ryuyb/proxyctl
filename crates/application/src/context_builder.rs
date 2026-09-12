@@ -66,6 +66,7 @@ pub struct AppContextBuilder {
     events: Option<Arc<dyn EventPublisher>>,
     instances: Option<Arc<dyn InstanceRepository>>,
     start_options: Option<crate::ports::process_manager::StartOptions>,
+    fetch_policy: Option<proxy_domain::subscription::SubscriptionFetchPolicy>,
 }
 
 impl AppContextBuilder {
@@ -210,6 +211,20 @@ impl AppContextBuilder {
         self
     }
 
+    /// Sets the outbound fetch policy for subscription sources.
+    ///
+    /// Optional, and the default is the safe one: public destinations only. A
+    /// caller that forgets this gets a refusal for an internal address rather
+    /// than a silent probe.
+    #[must_use]
+    pub fn fetch_policy(
+        mut self,
+        policy: proxy_domain::subscription::SubscriptionFetchPolicy,
+    ) -> Self {
+        self.fetch_policy = Some(policy);
+        self
+    }
+
     /// Produces the context, or reports the first missing dependency.
     ///
     /// # Errors
@@ -251,6 +266,9 @@ impl AppContextBuilder {
                 }
                 state
             })),
+            fetch_policy: self
+                .fetch_policy
+                .unwrap_or_else(proxy_domain::subscription::SubscriptionFetchPolicy::public_only),
         })
     }
 }

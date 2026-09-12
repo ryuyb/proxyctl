@@ -16,6 +16,7 @@ use crate::ports::{
     SubscriptionRepository,
 };
 use proxy_domain::shared::id::MihomoInstanceId;
+use proxy_domain::subscription::SubscriptionFetchPolicy;
 
 /// The kernel process this agent started, if any.
 ///
@@ -107,6 +108,12 @@ pub struct AppContext {
     pub guards: Arc<SubscriptionGuards>,
     /// The kernel process this agent supervises.
     pub process_state: Arc<Mutex<ProcessState>>,
+    /// What outbound destinations a subscription fetch may reach.
+    ///
+    /// A plain value rather than a port: it is a decision the operator made, not
+    /// a capability something implements. Defaulting to public-only is what makes
+    /// a subscription pointing inward a refusal rather than a silent probe.
+    pub fetch_policy: SubscriptionFetchPolicy,
 }
 
 impl std::fmt::Debug for AppContext {

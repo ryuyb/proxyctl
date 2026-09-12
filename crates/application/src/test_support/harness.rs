@@ -15,6 +15,7 @@ use crate::test_support::doubles::*;
 use proxy_domain::configuration::{ConfigChecksum, ConfigSource, ConfigVersion};
 use proxy_domain::shared::id::{ConfigVersionId, MihomoInstanceId};
 use proxy_domain::shared::time::Timestamp;
+use proxy_domain::subscription::SubscriptionFetchPolicy;
 
 /// Everything a use-case test needs, plus the doubles for assertions.
 pub struct Harness {
@@ -54,6 +55,20 @@ impl Harness {
     /// Builds a harness with the supplied validator and converter.
     #[must_use]
     pub fn new(validator: FakeValidator, converter: FakeConverter) -> Self {
+        Self::with_policy(validator, converter, SubscriptionFetchPolicy::public_only())
+    }
+
+    /// Builds a harness whose subscription fetch policy permits specific targets.
+    ///
+    /// The policy is fixed when the context is assembled, so changing it means
+    /// rebuilding — which is the honest shape: a running agent does not change its
+    /// fetch policy underneath a use case.
+    #[must_use]
+    pub fn with_policy(
+        validator: FakeValidator,
+        converter: FakeConverter,
+        policy: SubscriptionFetchPolicy,
+    ) -> Self {
         let calls = CallLog::new();
         let configs = Arc::new(ConfigStore::new());
         let controller = Arc::new(FakeController::default());
@@ -86,6 +101,7 @@ impl Harness {
                 .kernel(Arc::new(FakeKernelInstaller))
                 .events(events.clone())
                 .instances(instances.clone())
+                .fetch_policy(policy)
                 .build()
                 .expect("every dependency is supplied above");
 

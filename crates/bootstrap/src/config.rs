@@ -173,6 +173,16 @@ pub struct RuntimeConfig {
     ///
     /// `None` means "derive it from [`DataPaths`]".
     pub scratch_dir: Option<String>,
+    /// Outbound destinations a subscription fetch may reach.
+    ///
+    /// Entries are host names or CIDR blocks. Empty (the default) means public
+    /// destinations only, which refuses loopback, link-local, and private ranges —
+    /// a subscription pointing inward would otherwise turn the agent into a probe
+    /// for the host's internal network.
+    ///
+    /// An operator running a converter inside their own network adds that network
+    /// here, deliberately.
+    pub subscription_allow: Vec<String>,
     /// The kernel controller's shared secret.
     ///
     /// Only meaningful for a loopback controller. Over a unix socket the kernel
@@ -194,6 +204,7 @@ impl RuntimeConfig {
             kernel_binary: DEFAULT_KERNEL_BINARY.to_owned(),
             kernel_data_dir: None,
             scratch_dir: None,
+            subscription_allow: Vec::new(),
             mihomo_secret: None,
         }
     }
@@ -219,6 +230,7 @@ impl RuntimeConfig {
             kernel_binary: format!("{root}/bin/mihomo"),
             kernel_data_dir: Some(format!("{root}/lib/mihomo")),
             scratch_dir: Some(format!("{root}/lib/scratch")),
+            subscription_allow: Vec::new(),
             mihomo_secret: None,
         }
     }
