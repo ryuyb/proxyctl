@@ -67,14 +67,78 @@ pub struct AppState {
     pub ctx: Arc<AppContext>,
     /// The authentication policy in force.
     pub auth: AuthPolicy,
+    /// Where the event endpoint gets its stream, when one is wired.
+    ///
+    /// `None` means no event source was supplied — the agent was composed without
+    /// one, or a test did not need it. The endpoint reports that as
+    /// unavailability rather than hanging, because a subscriber waiting forever on
+    /// a channel nobody publishes to is indistinguishable from a quiet system.
+    pub events: Option<Arc<dyn EventSource>>,
 }
 
 impl AppState {
-    /// Builds state.
+    /// Builds state without an event source.
     #[must_use]
     pub fn new(ctx: Arc<AppContext>, auth: AuthPolicy) -> Self {
-        Self { ctx, auth }
+        Self {
+            ctx,
+            auth,
+            events: None,
+        }
     }
+
+    /// Builds state with an event source.
+    #[must_use]
+    pub fn with_events(
+        ctx: Arc<AppContext>,
+        auth: AuthPolicy,
+        events: Arc<dyn EventSource>,
+    ) -> Self {
+        Self {
+            ctx,
+            auth,
+            events: Some(events),
+        }
+    }
+}
+
+/// Supplies event streams to the HTTP layer.
+///
+/// # Why a port here and not the application's publisher
+///
+/// The application's `EventPublisher` is publish-only, deliberately: a use case
+/// that could subscribe would be tempted to depend on event ordering, and this
+/// design treats events as notifications rather than as a ledger.
+///
+/// So the interface layer gets its own narrow view. It is a trait rather than a
+/// concrete `broadcast::Receiver` so this crate does not depend on the transport
+/// mechanism, and so a test can supply a scripted stream without a runtime.
+pub trait EventSource: Send + Sync {
+    /// Subscribes to events published from now on.
+    ///
+    /// Only events after this call are delivered; a subscriber that wants the
+    /// current state reads it through the API. That is what makes the endpoint's
+    /// contract "changes since you connected" rather than "the world".
+    fn subscribe(&self) -> Box<dyn EventStream>;
+
+    /// How many subscribers are attached, for diagnostics.
+    fn subscriber_count(&self) -> usize;
+}
+
+/// A stream of events.
+///
+/// The items are the interface layer's own type rather than the application's
+/// `DomainEvent`, so a change to the domain event set does not ripple into this
+/// signature without a decision.
+pub trait EventStream: Send {
+    /// The next event, or `None` when the source has closed.
+    ///
+    /// `Box::pin`'d so the trait stays object-safe.
+    fn next_event<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<crate::events::Event>> + Send + 'a>,
+    >;
 }
 
 impl std::fmt::Debug for AppState {

@@ -55,6 +55,23 @@ impl BroadcastEventPublisher {
         Self { sender }
     }
 
+    /// Wraps an existing channel.
+    ///
+    /// Needed by the composition root, which holds one channel and hands its two
+    /// ends to the application and the interface layer. Constructing a second
+    /// publisher instead would create a bus nobody subscribes to — a defect that
+    /// is invisible until someone wonders why no events arrive.
+    #[must_use]
+    pub fn from_sender(sender: broadcast::Sender<DomainEvent>) -> Self {
+        Self { sender }
+    }
+
+    /// The underlying sender, for a caller that needs to build both ends.
+    #[must_use]
+    pub fn sender_handle(&self) -> broadcast::Sender<DomainEvent> {
+        self.sender.clone()
+    }
+
     /// Subscribes to subsequent events.
     ///
     /// Only events published *after* this call are delivered.

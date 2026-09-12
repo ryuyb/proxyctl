@@ -301,6 +301,55 @@ impl Bootstrap {
         Self::build(&factory, config).await
     }
 
+    /// Composes a context **and** the interface-side event source.
+    ///
+    /// The agent needs both: the context goes to the application, and the source
+    /// goes to the HTTP layer, and they must describe one channel. Returning them
+    /// together is what makes that guarantee structural rather than a convention —
+    /// a caller cannot take the context from one composition and the events from
+    /// another, which is the mistake the split `build_real` would allow.
+    ///
+    /// The event source is `None` when the deployment did not ask for kernel logs
+    /// to be published: the endpoint still serves state-change events, and reports
+    /// the source's absence rather than hanging.
+    ///
+    /// # Errors
+    ///
+    /// As [`build_real`](Self::build_real).
+    pub async fn build_real_with_events(
+        config: &RuntimeConfig,
+    ) -> Result<
+        (
+            AppContext,
+            Option<std::sync::Arc<dyn proxy_interfaces::http::state::EventSource>>,
+        ),
+        BootstrapError,
+    > {
+        Self::prepare_directories(config).await?;
+        let pool = Self::open_store(config).await?;
+        let configs =
+            FileConfigRepository::over_existing_dir(pool.clone(), &config.paths.configs_dir);
+        let probe = proxy_application::ports::config_repository::ConfigRepository::list(
+            &configs,
+            &config.instance,
+            1,
+        )
+        .await
+        .map_err(|e| BootstrapError::Paths {
+            path: config.paths.configs_dir.clone(),
+            reason: e.to_string(),
+        })?;
+        drop(probe);
+
+        let secret = Self::resolve_secret(config, &pool).await?;
+        let factory = RealFactory::new(pool, config, secret)?;
+        let context = Self::build(&factory, config).await?;
+        Ok((
+            context,
+            Some(crate::event_bridge::source_handle(factory.event_sender())),
+        ))
+    }
+
     /// The options a first start uses to spawn the kernel.
     ///
     /// # The config path comes from the active pointer, not from a guessed name

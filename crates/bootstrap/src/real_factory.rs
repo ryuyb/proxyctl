@@ -48,7 +48,7 @@ use proxy_application::ports::capability_probe::CapabilityProbe;
 use proxy_application::ports::config_repository::ConfigRepository;
 use proxy_application::ports::config_validator::ConfigValidator;
 use proxy_application::ports::error::{ConverterError, PortError};
-use proxy_application::ports::event_publisher::EventPublisher;
+use proxy_application::ports::event_publisher::{DomainEvent, EventPublisher};
 use proxy_application::ports::instance_repository::InstanceRepository;
 use proxy_application::ports::job_registry::JobRegistry;
 use proxy_application::ports::kernel_installer::KernelInstaller;
@@ -112,6 +112,18 @@ pub struct RealFactory {
     /// `None` over a unix socket, where the kernel ignores it entirely and the
     /// socket's own permissions are the boundary.
     mihomo_secret: Option<String>,
+    /// The event bus, held as its concrete type.
+    ///
+    /// Held rather than created per call because a publisher and its subscriber
+    /// must be the *same channel*. The previous version constructed a fresh
+    /// `BroadcastEventPublisher` inside `events()`, so a second call would have
+    /// handed out a bus nobody was publishing to — a defect that stayed hidden
+    /// only because the method happened to be called once.
+    ///
+    /// Kept concrete rather than as `Arc<dyn EventPublisher>` because the
+    /// subscriber side is not part of the port: the application publishes, and
+    /// only the interface layer subscribes.
+    event_bus: BroadcastEventPublisher,
 }
 
 impl RealFactory {
@@ -151,7 +163,29 @@ impl RealFactory {
             kernel_data_dir: config.kernel_data_dir(),
             scratch_dir: config.scratch_dir(),
             mihomo_secret,
+            event_bus: BroadcastEventPublisher::new(),
         })
+    }
+
+    /// The publishing end of the event channel, for the bridge.
+    ///
+    /// Handed out as the concrete `broadcast::Sender` because the bridge needs to
+    /// construct both its ends from one channel; the application keeps receiving
+    /// only the publish-only port.
+    #[must_use]
+    pub fn event_sender(&self) -> tokio::sync::broadcast::Sender<DomainEvent> {
+        self.event_bus.sender_handle()
+    }
+
+    /// A receiver for events published through this factory.
+    ///
+    /// Not part of [`AdapterFactory`](crate::AdapterFactory): the application only
+    /// publishes, and handing every use case a subscription would invite business
+    /// logic to depend on event ordering. The composition root calls this to give
+    /// the interface layer its side of the same channel.
+    #[must_use]
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<DomainEvent> {
+        self.event_bus.subscribe()
     }
 
     /// The database pool every storage adapter shares.
@@ -531,7 +565,9 @@ impl AdapterFactory for RealFactory {
     }
 
     fn events(&self) -> Arc<dyn EventPublisher> {
-        Arc::new(BroadcastEventPublisher::new())
+        // The same instance the subscriber side hands out, so publishing and
+        // subscribing share one channel.
+        Arc::new(self.event_bus.clone())
     }
 
     fn instances(&self) -> Arc<dyn InstanceRepository> {
