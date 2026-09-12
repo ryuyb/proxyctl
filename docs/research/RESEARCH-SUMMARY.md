@@ -68,6 +68,7 @@ docs/research/requirements.md
 | [ADR-006](adr/ADR-006-deployment-model.md) | **默认 Model D**：Agent + Mihomo + 可选 Sub-Store + metacubexd 静态产物；deb 主分发；不做官方镜像 | 不采用 metacubexd agent/all-in-one；三条独立升级链路 |
 | [ADR-007](adr/ADR-007-metadata-persistence.md) | 元数据驱动选 `rusqlite` + `bundled`（偏离 `AGENTS.md` 的 `sqlx` 基线）；连接池而非全局锁；Domain 增加受校验的重建入口 | 读不出来必须报错、不得默认值；审计用结构化列不用显示 label；Domain 仍只依赖 `thiserror` |
 | [ADR-008](adr/ADR-008-kernel-acquisition-and-field-validation.md) | 内核二进制只从上游 release 直连（不收口镜像）；校验用 GitHub API 的 asset `digest`；`mihomo -t` 必须在隔离目录跑；字段白名单由上游源码生成 | 无 digest 即拒绝安装；digest 覆盖压缩产物而非解压后二进制；未知字段报告而非拒绝；unsafe 收进 `proxy-sys` |
+| [ADR-009](adr/ADR-009-real-adapter-composition.md) | 真实适配器装配：pool 与 secret 由 composition root 预构造后作为纯数据注入；目录权限分 `Required`/`Preferred` 两档并接受 sticky 目录；未实现 port 显式报错 | `AdapterFactory` 不接收 `&AppContext` 的约束保留；`StartOptions` 的配置路径从**激活指针**解析（不得写死文件名）；首次端到端真机联通 |
 
 ---
 
