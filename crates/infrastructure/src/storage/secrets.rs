@@ -34,7 +34,7 @@ use rusqlite::OptionalExtension;
 use async_trait::async_trait;
 
 use proxy_application::ports::PortError;
-use proxy_application::ports::secret_store::{Principal, Role, SecretStore};
+use proxy_application::ports::secret_store::{Principal, PrincipalSummary, Role, SecretStore};
 
 use crate::storage::{SqlitePool, storage_err};
 
@@ -85,35 +85,39 @@ impl SqliteSecretStore {
         Ok(generated)
     }
 
-    /// Issues an API token with administrative access and returns it.
+    /// Issues an API token and returns it.
     ///
-    /// The token is returned exactly once, to the caller that asked for it;
-    /// there is no way to read it back afterwards.
+    /// The value is returned exactly once — it is not stored, and there is no
+    /// method that can read it back. What is stored is a salted hash, so a copy of
+    /// the database does not yield working credentials.
     ///
     /// # Errors
     ///
     /// Returns [`PortError::Storage`] when entropy cannot be read or the token
     /// cannot be persisted.
-    pub async fn issue_api_token(&self, principal: &str) -> Result<String, PortError> {
+    pub async fn issue_api_token(&self, principal: &str, role: Role) -> Result<String, PortError> {
         if principal.trim().is_empty() {
             return Err(storage_err("a principal identifier must not be empty"));
         }
         let token = generate_secret()?;
+        let salt = generate_secret()?;
+        let hash = hash_token(&salt, &token);
+
         let id = principal.to_owned();
-        let stored = token.clone();
+        let role = role_label(role);
         let created = wall_clock_seconds();
-        let role = role_label(DEFAULT_TOKEN_ROLE);
 
         self.pool
             .with_connection(move |conn| {
                 conn.execute(
-                    "INSERT INTO api_principals (id, role, token, created_at)
-                     VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO api_principals (id, role, token_hash, token_salt, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(id) DO UPDATE SET
                         role = excluded.role,
-                        token = excluded.token,
+                        token_hash = excluded.token_hash,
+                        token_salt = excluded.token_salt,
                         created_at = excluded.created_at",
-                    rusqlite::params![id, role, stored, created],
+                    rusqlite::params![id, role, hash, salt, created],
                 )
                 .map_err(|e| storage_err(format!("cannot issue an api token: {e}")))?;
                 Ok(())
@@ -121,6 +125,66 @@ impl SqliteSecretStore {
             .await?;
 
         Ok(token)
+    }
+
+    /// Lists principals, without their hashes or salts.
+    ///
+    /// Deliberately narrow: an administrative listing that returned hashes would
+    /// turn a read-only diagnostic into an offline attack surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError::Storage`] when the table cannot be read.
+    pub async fn list_api_tokens(&self) -> Result<Vec<PrincipalSummary>, PortError> {
+        self.pool
+            .with_connection(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT id, role, created_at FROM api_principals ORDER BY id")
+                    .map_err(|e| storage_err(format!("cannot prepare listing: {e}")))?;
+                let mapped = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })
+                    .map_err(|e| storage_err(format!("cannot read principals: {e}")))?;
+
+                let mut out = Vec::new();
+                for entry in mapped {
+                    let (id, role, created_at) =
+                        entry.map_err(|e| storage_err(format!("cannot read a row: {e}")))?;
+                    out.push(PrincipalSummary {
+                        id,
+                        role: role_from_label(&role)?,
+                        created_at,
+                    });
+                }
+                Ok(out)
+            })
+            .await
+    }
+
+    /// Removes a principal's token.
+    ///
+    /// Returns whether one was removed. An unknown principal is not an error: the
+    /// caller's intent — "this principal must not authenticate" — is satisfied
+    /// either way.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError::Storage`] when the row cannot be deleted.
+    pub async fn revoke_api_token(&self, principal: &str) -> Result<bool, PortError> {
+        let id = principal.to_owned();
+        self.pool
+            .with_connection(move |conn| {
+                let affected = conn
+                    .execute("DELETE FROM api_principals WHERE id = ?1", [id.as_str()])
+                    .map_err(|e| storage_err(format!("cannot revoke an api token: {e}")))?;
+                Ok(affected > 0)
+            })
+            .await
     }
 
     /// Reads a stored value.
@@ -196,6 +260,18 @@ impl SecretStore for SqliteSecretStore {
         Ok(generated)
     }
 
+    async fn issue_api_token(&self, principal: &str, role: Role) -> Result<String, PortError> {
+        Self::issue_api_token(self, principal, role).await
+    }
+
+    async fn list_api_tokens(&self) -> Result<Vec<PrincipalSummary>, PortError> {
+        Self::list_api_tokens(self).await
+    }
+
+    async fn revoke_api_token(&self, principal: &str) -> Result<bool, PortError> {
+        Self::revoke_api_token(self, principal).await
+    }
+
     async fn verify_api_token(&self, presented: &str) -> Result<Option<Principal>, PortError> {
         if presented.is_empty() {
             return Ok(None);
@@ -205,7 +281,7 @@ impl SecretStore for SqliteSecretStore {
             .pool
             .with_connection(|conn| {
                 let mut statement = conn
-                    .prepare("SELECT id, role, token FROM api_principals")
+                    .prepare("SELECT id, role, token_hash, token_salt FROM api_principals")
                     .map_err(|e| storage_err(format!("cannot prepare token lookup: {e}")))?;
                 let mapped = statement
                     .query_map([], |row| {
@@ -213,6 +289,7 @@ impl SecretStore for SqliteSecretStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     })
                     .map_err(|e| storage_err(format!("cannot read api tokens: {e}")))?;
@@ -225,11 +302,17 @@ impl SecretStore for SqliteSecretStore {
             })
             .await?;
 
-        // Every candidate is compared, and a match is not returned early, so the
-        // work done does not depend on which principal matched.
+        // Every candidate is hashed and compared, and a match is not returned
+        // early, so the work done does not depend on which principal matched.
+        //
+        // Each row's own salt is used, so the presented token is hashed once per
+        // candidate. That is bounded by the number of principals — a handful — and
+        // buying a cheaper scheme would mean a global salt, which would let two
+        // databases be compared against each other.
         let mut matched: Option<Principal> = None;
-        for (id, role, token) in rows {
-            if constant_time_eq(token.as_bytes(), presented.as_bytes()) && matched.is_none() {
+        for (id, role, hash, salt) in rows {
+            let candidate = hash_token(&salt, presented);
+            if constant_time_eq(hash.as_bytes(), candidate.as_bytes()) && matched.is_none() {
                 matched = Some(Principal {
                     id,
                     role: role_from_label(&role)?,
@@ -240,6 +323,31 @@ impl SecretStore for SqliteSecretStore {
         // An unknown token is an expected outcome, not a fault.
         Ok(matched)
     }
+}
+
+/// Hashes a token with its salt.
+///
+/// SHA-256 with a per-row salt, and not a password hash, because the input is a
+/// generated 256-bit random value rather than something a human chose: there is no
+/// dictionary to attack, and a deliberately slow hash would tax every request for
+/// no security gain. The salt exists so two identical tokens cannot be spotted by
+/// comparing databases.
+fn hash_token(salt: &str, token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    // Domain-separated, so a hash produced here cannot collide with one produced
+    // for another purpose from the same pair of strings.
+    hasher.update(b"proxyctl/api-token/v1");
+    hasher.update(salt.as_bytes());
+    hasher.update(b":");
+    hasher.update(token.as_bytes());
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 /// Compares two byte strings in constant time with respect to their contents.

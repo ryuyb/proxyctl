@@ -1,6 +1,7 @@
 //! Tests for the SQLite secret store.
 
 use super::*;
+use proxy_application::ports::secret_store::Role;
 use proxy_application::ports::secret_store::SecretStore;
 
 async fn store() -> (SqliteSecretStore, SqlitePool, tempfile::TempDir) {
@@ -133,7 +134,10 @@ async fn storing_an_empty_secret_is_refused() {
 #[tokio::test]
 async fn an_issued_token_verifies() {
     let (store, _pool, _dir) = store().await;
-    let token = store.issue_api_token("operator").await.expect("issue");
+    let token = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
 
     let principal = store
         .verify_api_token(&token)
@@ -150,7 +154,10 @@ async fn an_issued_token_verifies() {
 #[tokio::test]
 async fn an_unknown_token_returns_none_rather_than_an_error() {
     let (store, _pool, _dir) = store().await;
-    let _ = store.issue_api_token("operator").await.expect("issue");
+    let _ = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
 
     assert!(
         store
@@ -164,7 +171,10 @@ async fn an_unknown_token_returns_none_rather_than_an_error() {
 #[tokio::test]
 async fn an_empty_presented_token_returns_none() {
     let (store, _pool, _dir) = store().await;
-    let _ = store.issue_api_token("operator").await.expect("issue");
+    let _ = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
     assert!(store.verify_api_token("").await.expect("verify").is_none());
 }
 
@@ -173,7 +183,10 @@ async fn an_empty_presented_token_returns_none() {
 #[tokio::test]
 async fn a_prefix_of_a_valid_token_does_not_verify() {
     let (store, _pool, _dir) = store().await;
-    let token = store.issue_api_token("operator").await.expect("issue");
+    let token = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
 
     let prefix = &token[..token.len() - 1];
     assert!(
@@ -199,8 +212,14 @@ async fn a_prefix_of_a_valid_token_does_not_verify() {
 #[tokio::test]
 async fn issuing_a_new_token_replaces_the_previous_one() {
     let (store, _pool, _dir) = store().await;
-    let first = store.issue_api_token("operator").await.expect("first");
-    let second = store.issue_api_token("operator").await.expect("second");
+    let first = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("first");
+    let second = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("second");
 
     assert_ne!(first, second);
     assert!(
@@ -223,7 +242,7 @@ async fn issuing_a_new_token_replaces_the_previous_one() {
 #[tokio::test]
 async fn an_empty_principal_is_refused() {
     let (store, _pool, _dir) = store().await;
-    assert!(store.issue_api_token("  ").await.is_err());
+    assert!(store.issue_api_token("  ", Role::Admin).await.is_err());
 }
 
 /// A role written by something other than this build must be reported, not
@@ -234,9 +253,11 @@ async fn an_unknown_role_is_reported() {
 
     pool.with_connection(|conn| {
         conn.execute(
-            "INSERT INTO api_principals (id, role, token, created_at)
-             VALUES ('weird', 'superuser', 'abc123', 1)",
-            [],
+            // The hash must match the presented token, or the row would be
+            // skipped before its role is ever read — see the note below.
+            "INSERT INTO api_principals (id, role, token_hash, token_salt, created_at)
+             VALUES ('weird', 'superuser', ?1, 'salt', 1)",
+            [super::hash_token("salt", "abc123")],
         )
         .map_err(|e| storage_err(e.to_string()))?;
         Ok(())
@@ -244,6 +265,14 @@ async fn an_unknown_role_is_reported() {
     .await
     .expect("insert");
 
+    // A stored role the build does not recognise must surface as corruption
+    // rather than being silently treated as read-only.
+    //
+    // This only fires on a *matching* token now. Under plaintext storage the role
+    // was read for every row, so a bogus token could surface this error; with
+    // hashed storage the comparison happens first and a non-matching row is
+    // skipped, which is the correct order — an attacker guessing tokens must not
+    // be able to make the store report anything about a principal.
     let err = store
         .verify_api_token("abc123")
         .await
@@ -266,7 +295,10 @@ async fn constant_time_comparison_is_correct() {
 #[tokio::test]
 async fn the_token_is_not_readable_from_the_store_after_issue() {
     let (store, _pool, _dir) = store().await;
-    let token = store.issue_api_token("operator").await.expect("issue");
+    let token = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
 
     // Verification is the only way back in; there is no read-the-token method.
     let principal = store
@@ -297,4 +329,229 @@ async fn ensure_is_idempotent() {
     let first = store.ensure_mihomo_secret().await.expect("first");
     let second = store.ensure_mihomo_secret().await.expect("second");
     assert_eq!(first, second);
+}
+
+/// The reason the token column became a hash: a copy of the database must not
+/// yield working credentials.
+#[tokio::test]
+async fn a_token_is_not_recoverable_from_the_database() {
+    let (store, pool, _dir) = store().await;
+    let token = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
+
+    let stored: Vec<(String, String)> = pool
+        .with_connection(|conn| {
+            let mut statement = conn
+                .prepare("SELECT token_hash, token_salt FROM api_principals")
+                .map_err(|e| storage_err(e.to_string()))?;
+            let mapped = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| storage_err(e.to_string()))?;
+            let mut out = Vec::new();
+            for entry in mapped {
+                out.push(entry.map_err(|e| storage_err(e.to_string()))?);
+            }
+            Ok(out)
+        })
+        .await
+        .expect("read");
+
+    assert_eq!(stored.len(), 1);
+    let (hash, salt) = &stored[0];
+    assert_ne!(hash, &token, "the token must not be stored as itself");
+    assert!(
+        !hash.contains(&token),
+        "the token must not appear inside the stored value"
+    );
+    assert!(!salt.is_empty(), "a salt must be stored");
+
+    // And the token still works, so hashing did not break verification.
+    let principal = store
+        .verify_api_token(&token)
+        .await
+        .expect("verify")
+        .expect("a match");
+    assert_eq!(principal.id, "operator");
+    assert_eq!(principal.role, Role::Admin);
+}
+
+/// Two principals issued the same token value would still store different hashes,
+/// so a stolen database cannot be compared against another one.
+#[tokio::test]
+async fn identical_tokens_would_produce_different_hashes() {
+    // Two salts over one token: the property under test is the salt's effect, so
+    // it is asserted directly rather than by trying to collide real tokens.
+    let a = super::hash_token("salt-a", "same-token");
+    let b = super::hash_token("salt-b", "same-token");
+    assert_ne!(a, b, "a per-row salt must change the hash");
+}
+
+/// The salt is per row, not global, which is what makes the previous property
+/// hold across principals.
+#[tokio::test]
+async fn each_principal_gets_its_own_salt() {
+    let (store, pool, _dir) = store().await;
+    store
+        .issue_api_token("first", Role::Admin)
+        .await
+        .expect("issue");
+    store
+        .issue_api_token("second", Role::Admin)
+        .await
+        .expect("issue");
+
+    let salts: Vec<String> = pool
+        .with_connection(|conn| {
+            let mut statement = conn
+                .prepare("SELECT token_salt FROM api_principals ORDER BY id")
+                .map_err(|e| storage_err(e.to_string()))?;
+            let mapped = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| storage_err(e.to_string()))?;
+            let mut out = Vec::new();
+            for entry in mapped {
+                out.push(entry.map_err(|e| storage_err(e.to_string()))?);
+            }
+            Ok(out)
+        })
+        .await
+        .expect("read");
+
+    assert_eq!(salts.len(), 2);
+    assert_ne!(salts[0], salts[1], "salts must not be shared");
+}
+
+/// The two roles must survive the round trip, since authorization depends on it.
+#[tokio::test]
+async fn both_roles_round_trip() {
+    let (store, _pool, _dir) = store().await;
+    let admin = store
+        .issue_api_token("an-admin", Role::Admin)
+        .await
+        .expect("issue");
+    let viewer = store
+        .issue_api_token("a-viewer", Role::ReadOnly)
+        .await
+        .expect("issue");
+
+    assert_eq!(
+        store
+            .verify_api_token(&admin)
+            .await
+            .expect("verify")
+            .expect("match")
+            .role,
+        Role::Admin
+    );
+    assert_eq!(
+        store
+            .verify_api_token(&viewer)
+            .await
+            .expect("verify")
+            .expect("match")
+            .role,
+        Role::ReadOnly
+    );
+}
+
+/// Issuing again for the same principal replaces the token, which is how rotation
+/// is expressed, and the old value must stop working.
+#[tokio::test]
+async fn reissuing_replaces_the_token_and_retires_the_old_one() {
+    let (store, _pool, _dir) = store().await;
+    let first = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("first");
+    let second = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("second");
+
+    assert_ne!(first, second, "a new token must be a new value");
+    assert!(
+        store
+            .verify_api_token(&first)
+            .await
+            .expect("verify")
+            .is_none(),
+        "the replaced token must no longer authenticate"
+    );
+    assert!(
+        store
+            .verify_api_token(&second)
+            .await
+            .expect("verify")
+            .is_some(),
+        "the current token must authenticate"
+    );
+}
+
+/// The listing must not carry anything that could authenticate a caller.
+#[tokio::test]
+async fn the_listing_exposes_no_hash_and_no_salt() {
+    let (store, _pool, _dir) = store().await;
+    let token = store
+        .issue_api_token("operator", Role::ReadOnly)
+        .await
+        .expect("issue");
+
+    let listed = store.list_api_tokens().await.expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "operator");
+    assert_eq!(listed[0].role, Role::ReadOnly);
+    assert!(listed[0].created_at > 0);
+
+    // The only fields that exist are the three above; this asserts the token
+    // cannot be reconstructed from what a listing returns.
+    let rendered = format!("{listed:?}");
+    assert!(
+        !rendered.contains(&token),
+        "the listing leaked the token: {rendered}"
+    );
+}
+
+/// Revocation must actually stop authentication, and report honestly.
+#[tokio::test]
+async fn revocation_removes_the_token_and_reports_whether_one_existed() {
+    let (store, _pool, _dir) = store().await;
+    let token = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
+
+    assert!(
+        store.revoke_api_token("operator").await.expect("revoke"),
+        "revoking an existing principal reports true"
+    );
+    assert!(
+        store
+            .verify_api_token(&token)
+            .await
+            .expect("verify")
+            .is_none(),
+        "a revoked token must not authenticate"
+    );
+    assert!(
+        !store
+            .revoke_api_token("operator")
+            .await
+            .expect("revoke again"),
+        "revoking an unknown principal reports false rather than failing"
+    );
+}
+
+/// A blank token must not authenticate, and must not be hashed into a match.
+#[tokio::test]
+async fn an_empty_presented_token_is_never_a_match() {
+    let (store, _pool, _dir) = store().await;
+    let _ = store
+        .issue_api_token("operator", Role::Admin)
+        .await
+        .expect("issue");
+    assert!(store.verify_api_token("").await.expect("verify").is_none());
 }

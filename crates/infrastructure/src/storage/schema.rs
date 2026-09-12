@@ -24,7 +24,8 @@ use super::storage_err;
 /// from a new one rather than discovering the difference through a query error.
 ///
 /// Version 2 added the configuration, subscription, and credential tables.
-pub const SCHEMA_VERSION: i64 = 2;
+/// Version 3 stores API tokens as salted hashes rather than plaintext.
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Creates every table this build needs.
 ///
@@ -176,10 +177,23 @@ CREATE TABLE IF NOT EXISTS secrets (
     created_at      INTEGER NOT NULL
 );
 
+-- API tokens are stored as a salted hash, never in plaintext.
+--
+-- A token is the *only* credential on the TCP listener: over a unix socket the
+-- file permissions are the boundary, but a TCP caller is identified by nothing
+-- except the token it presents. Storing it in plaintext would mean that reading
+-- the database is equivalent to holding every credential, with no way to notice.
+--
+-- The salt is per row rather than global, so two identical tokens would not
+-- produce identical hashes and a stolen database cannot be compared against
+-- another. This is what makes a plain SHA-256 acceptable here: tokens are
+-- generated as high-entropy random values, not chosen by a human, so there is no
+-- dictionary to attack and no reason to pay for a slow hash on every request.
 CREATE TABLE IF NOT EXISTS api_principals (
     id              TEXT PRIMARY KEY NOT NULL,
     role            TEXT NOT NULL,
-    token           TEXT NOT NULL,
+    token_hash      TEXT NOT NULL,
+    token_salt      TEXT NOT NULL,
     created_at      INTEGER NOT NULL
 );
 ";

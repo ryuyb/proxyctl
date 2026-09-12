@@ -40,7 +40,7 @@ use crate::ports::mihomo_observer::{
 use crate::ports::process_manager::{
     AllowedSignal, ExitStatus, ProcessHandle, ProcessManager, ProcessStatus, StartOptions,
 };
-use crate::ports::secret_store::{Principal, SecretStore};
+use crate::ports::secret_store::{Principal, PrincipalSummary, Role, SecretStore};
 use crate::ports::service_manager::ServiceManager;
 use crate::ports::subscription_converter::{ConvertRequest, SubscriptionConverter};
 use crate::ports::subscription_repository::SubscriptionRepository;
@@ -178,10 +178,30 @@ impl SecretStore for FakeSecretStore {
     }
 
     async fn verify_api_token(&self, presented: &str) -> Result<Option<Principal>, PortError> {
-        Ok((presented == "test-token").then(|| Principal {
-            id: "test".to_owned(),
-            role: crate::ports::secret_store::Role::Admin,
-        }))
+        // Two fixed tokens, so a test can exercise both roles. Before the TCP
+        // listener existed every caller was an administrator by construction, and a
+        // double could only express that one case; the authorization rules in the
+        // connections and events endpoints are only reachable now.
+        let matched = match presented {
+            "test-token" => Some(("test".to_owned(), Role::Admin)),
+            "read-only-token" => Some(("viewer".to_owned(), Role::ReadOnly)),
+            _ => None,
+        };
+        Ok(matched.map(|(id, role)| Principal { id, role }))
+    }
+
+    async fn issue_api_token(&self, principal: &str, _role: Role) -> Result<String, PortError> {
+        // Deterministic rather than random: a double's value is used in
+        // assertions, and a value that changed per call could not be one.
+        Ok(format!("issued-token-for-{principal}"))
+    }
+
+    async fn list_api_tokens(&self) -> Result<Vec<PrincipalSummary>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn revoke_api_token(&self, _principal: &str) -> Result<bool, PortError> {
+        Ok(true)
     }
 }
 
