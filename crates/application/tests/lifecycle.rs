@@ -11,18 +11,33 @@ use proxy_application::commands::lifecycle::{
 };
 use proxy_application::ports::job_registry::{JobKind, JobRegistry, JobState};
 use proxy_application::test_support::{FakeConverter, FakeValidator, Harness, HealthBehaviour};
-use proxy_domain::mihomo::{MihomoInstance, MihomoStatus};
+use proxy_domain::mihomo::MihomoStatus;
 use proxy_domain::shared::id::MihomoInstanceId;
 use proxy_domain::shared::time::Timestamp;
 
 const NOW: Timestamp = Timestamp::from_unix_seconds(1_700_000_000);
 
-fn instance() -> MihomoInstance {
-    MihomoInstance::new(
-        MihomoInstanceId::parse("default").expect("valid"),
-        "default",
-    )
-    .expect("valid name")
+/// Reads the persisted lifecycle state.
+async fn loaded_status(harness: &Harness) -> MihomoStatus {
+    harness
+        .ctx
+        .instances
+        .load(&MihomoInstanceId::parse("default").expect("valid"))
+        .await
+        .expect("state readable")
+        .expect("state recorded")
+        .status()
+}
+
+/// Reads the persisted failure record.
+async fn loaded_failure(harness: &Harness) -> Option<proxy_domain::mihomo::FailureRecord> {
+    harness
+        .ctx
+        .instances
+        .load(&MihomoInstanceId::parse("default").expect("valid"))
+        .await
+        .expect("state readable")
+        .and_then(|instance| instance.last_failure().cloned())
 }
 
 /// A harness whose kernel starts successfully.
@@ -37,14 +52,13 @@ fn ready_harness() -> Harness {
 #[tokio::test]
 async fn start_spawns_and_reaches_running() {
     let harness = ready_harness();
-    let mut instance = instance();
 
-    let outcome = StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let outcome = StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start should succeed");
 
     assert!(matches!(outcome, StartOutcome::Started { .. }));
-    assert_eq!(instance.status(), MihomoStatus::RUNNING);
+    assert_eq!(loaded_status(&harness).await, MihomoStatus::RUNNING);
     assert_eq!(harness.process.calls.count("start"), 1);
 }
 
@@ -52,15 +66,14 @@ async fn start_spawns_and_reaches_running() {
 #[tokio::test]
 async fn repeated_start_requests_never_spawn_twice() {
     let harness = ready_harness();
-    let mut instance = instance();
 
-    let first = StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let first = StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("first start");
     assert!(first.spawned());
 
     for _ in 0..3 {
-        let outcome = StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+        let outcome = StartMihomo::execute(&harness.ctx, NOW)
             .await
             .expect("repeat start");
         assert_eq!(outcome, StartOutcome::AlreadyRunning);
@@ -77,9 +90,8 @@ async fn repeated_start_requests_never_spawn_twice() {
 #[tokio::test]
 async fn start_without_options_is_rejected() {
     let harness = Harness::new(FakeValidator::default(), FakeConverter::default());
-    let mut instance = instance();
 
-    let err = StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let err = StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect_err("no start options means nothing to spawn");
 
@@ -99,19 +111,18 @@ async fn failed_spawn_leaves_the_instance_failed_not_starting() {
         ..Default::default()
     });
     harness.ctx = ctx;
-    let mut instance = instance();
 
-    let err = StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let err = StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect_err("spawn fails");
 
     assert!(matches!(err, proxy_application::ApplicationError::Port(_)));
     assert_eq!(
-        instance.status(),
+        loaded_status(&harness).await,
         MihomoStatus::FAILED,
         "a failed spawn must not leave the instance stuck in Starting"
     );
-    assert!(instance.last_failure().is_some());
+    assert!(loaded_failure(&harness).await.is_some());
 }
 
 /// A kernel whose control API answers but whose proxy port never listens must be
@@ -125,9 +136,8 @@ async fn start_with_unlistening_proxy_port_is_degraded() {
         ..Default::default()
     });
     harness.ctx = ctx;
-    let mut instance = instance();
 
-    let outcome = StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let outcome = StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start completes");
 
@@ -135,9 +145,9 @@ async fn start_with_unlistening_proxy_port_is_degraded() {
         matches!(outcome, StartOutcome::Degraded { .. }),
         "got {outcome:?}"
     );
-    assert_eq!(instance.status(), MihomoStatus::DEGRADED);
+    assert_eq!(loaded_status(&harness).await, MihomoStatus::DEGRADED);
     assert!(
-        instance.status().is_live(),
+        loaded_status(&harness).await.is_live(),
         "the process must be left running for an operator to inspect"
     );
 }
@@ -145,9 +155,8 @@ async fn start_with_unlistening_proxy_port_is_degraded() {
 #[tokio::test]
 async fn start_records_a_succeeded_job() {
     let harness = ready_harness();
-    let mut instance = instance();
 
-    StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start");
 
@@ -161,26 +170,22 @@ async fn start_records_a_succeeded_job() {
 #[tokio::test]
 async fn stop_transitions_to_stopped() {
     let harness = ready_harness();
-    let mut instance = instance();
-    StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start");
 
-    let outcome = StopMihomo::execute(&harness.ctx, &mut instance, NOW)
-        .await
-        .expect("stop");
+    let outcome = StopMihomo::execute(&harness.ctx, NOW).await.expect("stop");
 
     assert_eq!(outcome, StopOutcome::Stopped { forced: false });
-    assert_eq!(instance.status(), MihomoStatus::STOPPED);
+    assert_eq!(loaded_status(&harness).await, MihomoStatus::STOPPED);
     assert!(harness.process.calls.contains("stop"));
 }
 
 #[tokio::test]
 async fn stopping_an_already_stopped_instance_is_not_an_error() {
     let harness = ready_harness();
-    let mut instance = instance();
 
-    let outcome = StopMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let outcome = StopMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("stopping a stopped instance is a no-op");
 
@@ -191,14 +196,11 @@ async fn stopping_an_already_stopped_instance_is_not_an_error() {
 #[tokio::test]
 async fn stop_asks_the_kernel_to_exit_before_killing_it() {
     let harness = ready_harness();
-    let mut instance = instance();
-    StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start");
 
-    StopMihomo::execute(&harness.ctx, &mut instance, NOW)
-        .await
-        .expect("stop");
+    StopMihomo::execute(&harness.ctx, NOW).await.expect("stop");
 
     assert!(
         harness.controller.calls.contains("shutdown"),
@@ -211,12 +213,11 @@ async fn stop_asks_the_kernel_to_exit_before_killing_it() {
 #[tokio::test]
 async fn reload_requires_an_active_version() {
     let harness = ready_harness();
-    let mut instance = instance();
-    StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start");
 
-    let err = ReloadMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let err = ReloadMihomo::execute(&harness.ctx, NOW)
         .await
         .expect_err("nothing to reload");
 
@@ -229,9 +230,8 @@ async fn reload_requires_an_active_version() {
 #[tokio::test]
 async fn reload_refuses_while_the_instance_is_not_serving() {
     let harness = ready_harness();
-    let mut instance = instance();
 
-    let err = ReloadMihomo::execute(&harness.ctx, &mut instance, NOW)
+    let err = ReloadMihomo::execute(&harness.ctx, NOW)
         .await
         .expect_err("a stopped instance cannot reload");
 
@@ -246,14 +246,11 @@ async fn reload_refuses_while_the_instance_is_not_serving() {
 #[tokio::test]
 async fn lifecycle_jobs_always_reach_a_terminal_state() {
     let harness = ready_harness();
-    let mut instance = instance();
 
-    StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start");
-    StopMihomo::execute(&harness.ctx, &mut instance, NOW)
-        .await
-        .expect("stop");
+    StopMihomo::execute(&harness.ctx, NOW).await.expect("stop");
 
     let jobs = harness.jobs.recent(10).await.expect("jobs");
     assert_eq!(jobs.len(), 2);

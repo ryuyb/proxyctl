@@ -19,7 +19,6 @@ use proxy_application::commands::update_subscription::{
 };
 use proxy_application::ports::job_registry::JobRegistry;
 use proxy_application::test_support::{FakeConverter, FakeValidator, Harness};
-use proxy_domain::mihomo::MihomoInstance;
 use proxy_domain::shared::id::{ConverterId, MihomoInstanceId, SubscriptionId};
 use proxy_domain::shared::time::Timestamp;
 use proxy_domain::subscription::schedule::Interval;
@@ -563,13 +562,8 @@ async fn update_releases_the_instance_lock() {
 #[tokio::test]
 async fn start_and_update_can_run_in_sequence() {
     let harness = prepared_harness(FakeConverter::default(), FakeValidator::default()).await;
-    let mut instance = MihomoInstance::new(
-        MihomoInstanceId::parse("default").expect("valid"),
-        "default",
-    )
-    .expect("valid");
 
-    StartMihomo::execute(&harness.ctx, &mut instance, NOW)
+    StartMihomo::execute(&harness.ctx, NOW)
         .await
         .expect("start");
     let output = UpdateSubscription::execute(&harness.ctx, input(), NOW)

@@ -15,6 +15,7 @@ pub mod config_repository;
 pub mod config_validator;
 pub mod error;
 pub mod event_publisher;
+pub mod instance_repository;
 pub mod job_registry;
 pub mod kernel_installer;
 pub mod mihomo_connection_ops;
@@ -33,6 +34,7 @@ pub use config_repository::ConfigRepository;
 pub use config_validator::{ConfigValidator, PreflightContext};
 pub use error::{ConverterError, PortError};
 pub use event_publisher::{DomainEvent, EventPublisher};
+pub use instance_repository::InstanceRepository;
 pub use job_registry::{
     Degradation, JobKind, JobRecord, JobRegistry, JobState, JobStep, JobTarget,
 };

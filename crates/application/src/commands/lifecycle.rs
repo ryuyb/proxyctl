@@ -77,26 +77,57 @@ impl StartOutcome {
     }
 }
 
+/// Loads the aggregate for the context's instance, under the caller's lock.
+///
+/// A first-ever start has no recorded state; a fresh aggregate is correct there,
+/// not an error.
+async fn load_instance(ctx: &AppContext) -> Result<MihomoInstance, ApplicationError> {
+    match ctx.instances.load(&ctx.instance).await? {
+        Some(instance) => Ok(instance),
+        None => MihomoInstance::new(ctx.instance.clone(), ctx.instance.as_str())
+            .map_err(ApplicationError::Domain),
+    }
+}
+
+/// Persists the aggregate before the lock is released.
+async fn save_instance(
+    ctx: &AppContext,
+    instance: &MihomoInstance,
+) -> Result<(), ApplicationError> {
+    ctx.instances.save(instance).await?;
+    Ok(())
+}
+
 /// Starts the kernel.
 pub struct StartMihomo;
 
 impl StartMihomo {
     /// Spawns the kernel if it is not already running.
     ///
+    /// # Contract
+    ///
+    /// The aggregate is loaded **after** the lock is acquired and saved before it
+    /// is released. That ordering is what makes the duplicate-spawn guard real: a
+    /// caller-supplied aggregate would let two callers each observe `Stopped`,
+    /// both decide to spawn, and produce two kernels even though the lock
+    /// serialized the calls.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the process cannot be spawned, when readiness times
-    /// out, or when no start options are configured. A duplicate start request
-    /// is not an error; it is reported as
-    /// [`StartOutcome::AlreadyStarting`] or [`StartOutcome::AlreadyRunning`].
+    /// Returns an error when the process cannot be spawned, readiness times out,
+    /// or state cannot be loaded. A duplicate request is not an error; it is
+    /// reported as [`StartOutcome::AlreadyStarting`] or
+    /// [`StartOutcome::AlreadyRunning`].
     pub async fn execute(
         ctx: &AppContext,
-        instance: &mut MihomoInstance,
         now: Timestamp,
     ) -> Result<StartOutcome, ApplicationError> {
         let _lock = ctx.locks.acquire(&ctx.instance).await;
 
-        // Ask the aggregate what to do. This is the duplicate-spawn guard.
+        let mut instance = load_instance(ctx).await?;
+
+        // Ask the aggregate what to do. This is the duplicate-spawn guard, and it
+        // now reads state that is shared rather than a copy the caller held.
         match instance.begin_start() {
             proxy_domain::mihomo::StartDecision::AlreadyStarting => {
                 return Ok(StartOutcome::AlreadyStarting);
@@ -122,9 +153,10 @@ impl StartMihomo {
             ApplicationError::InvalidState("no start options configured; cannot spawn".to_owned())
         })?;
 
-        // Move to Starting before spawning, so a failure leaves the machine in a
-        // state that reflects the attempt.
+        // Move to Starting and persist before spawning, so a concurrent request
+        // arriving now sees a start in flight rather than a stopped instance.
         instance.transition(MihomoStatus::STARTING)?;
+        save_instance(ctx, &instance).await?;
 
         let handle = match ctx.process.start(&options).await {
             Ok(handle) => handle,
@@ -134,6 +166,7 @@ impl StartMihomo {
                     now,
                 ));
                 let _ = instance.transition(MihomoStatus::FAILED);
+                save_instance(ctx, &instance).await?;
                 ctx.jobs
                     .update(
                         &job,
@@ -147,7 +180,6 @@ impl StartMihomo {
         };
         ctx.remember_process(handle, options);
 
-        // Poll for readiness rather than sleeping a fixed amount.
         let started_at = std::time::Instant::now();
         let health = Self::await_ready(ctx, DEFAULT_READY_TIMEOUT).await;
 
@@ -171,10 +203,11 @@ impl StartMihomo {
             }
             None => {
                 instance.note_failure(proxy_domain::mihomo::FailureRecord::new(
-                    format!("not ready within {:?}", DEFAULT_READY_TIMEOUT),
+                    format!("not ready within {DEFAULT_READY_TIMEOUT:?}"),
                     now,
                 ));
                 instance.transition(MihomoStatus::FAILED)?;
+                save_instance(ctx, &instance).await?;
                 let _ = ctx.process.stop(&handle, crate::DEFAULT_STOP_TIMEOUT).await;
                 ctx.clear_handle();
                 ctx.jobs
@@ -190,6 +223,8 @@ impl StartMihomo {
                 ));
             }
         };
+
+        save_instance(ctx, &instance).await?;
 
         let summary = match &outcome {
             StartOutcome::Started { pid, .. } => format!("started pid {pid}"),
@@ -214,8 +249,6 @@ impl StartMihomo {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Ok(health) = ctx.controller.health_check().await {
-                // Any answer means the kernel is up. Whether it is *healthy* is
-                // the caller's decision.
                 return Some(health);
             }
             if std::time::Instant::now() >= deadline {
@@ -237,10 +270,11 @@ impl StopMihomo {
     /// already-stopped instance is success.
     pub async fn execute(
         ctx: &AppContext,
-        instance: &mut MihomoInstance,
         now: Timestamp,
     ) -> Result<StopOutcome, ApplicationError> {
         let _lock = ctx.locks.acquire(&ctx.instance).await;
+
+        let mut instance = load_instance(ctx).await?;
 
         if !instance.status().is_live() {
             return Ok(StopOutcome::AlreadyStopped);
@@ -255,6 +289,7 @@ impl StopMihomo {
             .await?;
 
         instance.transition(MihomoStatus::STOPPING)?;
+        save_instance(ctx, &instance).await?;
 
         let forced = match ctx.current_handle() {
             Some(handle) => {
@@ -268,33 +303,26 @@ impl StopMihomo {
                 ctx.clear_handle();
                 status.forced
             }
-            None => {
-                // No handle means the agent did not spawn it, or already forgot
-                // it. There is nothing to stop, but the state should reflect
-                // reality rather than stay stuck in a live state.
-                false
-            }
+            // No handle means the agent did not spawn it, or already forgot it.
+            // Nothing to stop, but the state should reflect reality rather than
+            // stay stuck in a live state.
+            None => false,
         };
 
         instance.transition(MihomoStatus::STOPPED)?;
+        save_instance(ctx, &instance).await?;
 
+        let summary = format!("stopped (forced: {forced})");
+        let state = JobState::Succeeded {
+            summary,
+            degradation: None,
+        };
         ctx.events
             .publish(crate::ports::event_publisher::DomainEvent::JobFinished {
                 id: job.clone(),
-                state: JobState::Succeeded {
-                    summary: format!("stopped (forced: {forced})"),
-                    degradation: None,
-                },
+                state: state.clone(),
             });
-        ctx.jobs
-            .update(
-                &job,
-                JobState::Succeeded {
-                    summary: format!("stopped (forced: {forced})"),
-                    degradation: None,
-                },
-            )
-            .await?;
+        ctx.jobs.update(&job, state).await?;
 
         let _ = now;
         Ok(StopOutcome::Stopped { forced })
@@ -329,16 +357,16 @@ impl RestartMihomo {
     /// Propagates stop and start failures.
     pub async fn execute(
         ctx: &AppContext,
-        instance: &mut MihomoInstance,
         now: Timestamp,
     ) -> Result<StartOutcome, ApplicationError> {
         let _lock = ctx.locks.acquire(&ctx.instance).await;
 
+        let mut instance = load_instance(ctx).await?;
+
         if instance.status().is_live() {
-            // Transition through Stopping/Stopped so the aggregate's view stays
-            // coherent, then stop the process itself.
             if let Some(handle) = ctx.current_handle() {
                 instance.transition(MihomoStatus::STOPPING)?;
+                save_instance(ctx, &instance).await?;
                 let _ = ctx.controller.shutdown().await;
                 ctx.process
                     .stop(&handle, crate::DEFAULT_STOP_TIMEOUT)
@@ -346,12 +374,13 @@ impl RestartMihomo {
                 ctx.clear_handle();
             }
             instance.transition(MihomoStatus::STOPPED)?;
+            save_instance(ctx, &instance).await?;
         }
 
-        // The lock is already held here, so the start half is called directly.
+        // The lock is already held, so the start half is called directly.
         // Calling `StartMihomo::execute` would try to acquire the same
         // non-reentrant lock and deadlock.
-        Self::start_locked(ctx, instance, now).await
+        Self::start_locked(ctx, &mut instance, now).await
     }
 
     /// The start half, assuming the caller already holds the instance lock.
@@ -365,30 +394,33 @@ impl RestartMihomo {
         })?;
 
         instance.transition(MihomoStatus::STARTING)?;
+        save_instance(ctx, instance).await?;
+
         let handle = match ctx.process.start(&options).await {
             Ok(handle) => handle,
             Err(e) => {
                 instance.transition(MihomoStatus::FAILED)?;
+                save_instance(ctx, instance).await?;
                 return Err(e.into());
             }
         };
         ctx.remember_process(handle, options);
 
-        match StartMihomo::await_ready(ctx, DEFAULT_READY_TIMEOUT).await {
+        let outcome = match StartMihomo::await_ready(ctx, DEFAULT_READY_TIMEOUT).await {
             Some(health) if health.is_healthy() => {
                 instance.transition(MihomoStatus::RUNNING)?;
                 instance.clear_failure();
-                Ok(StartOutcome::Started {
+                StartOutcome::Started {
                     pid: handle.pid,
                     ready_after: Duration::ZERO,
-                })
+                }
             }
             Some(health) => {
                 instance.transition(MihomoStatus::DEGRADED)?;
-                Ok(StartOutcome::Degraded {
+                StartOutcome::Degraded {
                     pid: handle.pid,
                     health,
-                })
+                }
             }
             None => {
                 instance.note_failure(proxy_domain::mihomo::FailureRecord::new(
@@ -396,13 +428,17 @@ impl RestartMihomo {
                     now,
                 ));
                 instance.transition(MihomoStatus::FAILED)?;
+                save_instance(ctx, instance).await?;
                 let _ = ctx.process.stop(&handle, crate::DEFAULT_STOP_TIMEOUT).await;
                 ctx.clear_handle();
-                Err(ApplicationError::InvalidState(
+                return Err(ApplicationError::InvalidState(
                     "kernel did not become ready after restart".to_owned(),
-                ))
+                ));
             }
-        }
+        };
+
+        save_instance(ctx, instance).await?;
+        Ok(outcome)
     }
 }
 
@@ -426,10 +462,11 @@ impl ReloadMihomo {
     /// Returns [`ApplicationError::NotFound`] when no version is active.
     pub async fn execute(
         ctx: &AppContext,
-        instance: &mut MihomoInstance,
         _now: Timestamp,
     ) -> Result<ReloadOutcome, ApplicationError> {
         let _lock = ctx.locks.acquire(&ctx.instance).await;
+
+        let instance = load_instance(ctx).await?;
 
         if !instance.status().is_serving() {
             return Err(ApplicationError::InvalidState(format!(
