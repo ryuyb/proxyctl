@@ -255,10 +255,53 @@
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | **`OPEN`** |
-| 背景 | Sub-Store 的 `/download/:name` 要求订阅先存在（`POST /api/subs`），Agent 需写入其数据库。这带来副作用（写入外部服务状态）与 SSRF 面。 |
-| 备选 | ① 要求用户在 Sub-Store 中自建订阅，Agent 只读（最保守）；② Agent 幂等写入（当前设计）；③ 若 `content=` 内联可行，则完全绕过入库（未验证）。 |
-| 关联 | ADR-002 D1/D4、`04-sub-store.md` §10 O2/O5 |
+| 状态 | **`RESOLVED`（2026-09-12 实测：入库不可绕过，备选③ 已否决）** |
+| 结论 | **必须入库。** `GET /download/:name` 在解析任何查询参数**之前**先查订阅是否存在，所以 `content=` / `url=` 都无法替代入库。备选③ **不可行**；备选① 与 ② 仍然有效。 |
+| 实测环境 | Debian aarch64 + 官方 release bundle `sub-store.bundle.js` **v2.39.6** + Node v24.20.0，后端绑 `127.0.0.1:13001` |
+
+### 决定性实测（四组，逐条对照）
+
+| # | 请求 | 结果 | 含义 |
+|---|---|---|---|
+| 1 | `/download/agenttmp`（订阅不存在） | **404** `Subscription agenttmp does not exist!` | 基线：路由先查库 |
+| 2 | 同上 **+ `content=<raw YAML>`** | **404**（同样的错误） | **`content=` 在查库之后才被考虑**，无法替代入库 |
+| 3 | 同上 + `content` + `url=` 同时给 | **404** | 两个参数都救不了不存在的订阅名 |
+| 4 | 先 `POST /api/subs` 建订阅，**再**带 `content=<raw YAML>` | **200**，返回内联内容 | `content=` 生效——但它覆盖的是**远端抓取**，不是**入库** |
+
+**机制**：`content=` 的作用是"别去远端拉，用我给的这段"，其前置条件仍是"这个名字得先在库里"。所以它解决的是**离线/内网源**问题，不是**副作用**问题。
+
+### 编码契约（回答 O5）
+
+| 形式 | 结果 |
+|---|---|
+| `content=<raw YAML>` | ✅ 生效 |
+| `content=<base64>` | ❌ **不解码**，报"订阅中不含有效节点" |
+| `content=data:text/plain;base64,<b64>` | ❌ 同样不解码 |
+
+**`content=` 只接受 raw 文本，不做 base64 解码。** 故 O5 的答案是 **raw**。
+
+### 写入语义（影响备选②的实现）
+
+| 行为 | 实测 |
+|---|---|
+| `POST /api/subs` 新建 | **201**，无认证 |
+| 同名**再次** POST | **500** `DUPLICATE_KEY: Subscription <name> already exists.` |
+| `PATCH` / `PUT /api/subs/:name` | **无此路由**（Express 默认 404 HTML） |
+
+**所以"幂等写入"必须自己做**：先查（`GET /api/subs`）再决定 POST。**不能靠 PUT 覆盖**，同名 POST 会直接 500。这与 `SubscriptionRepository::save` 的幂等契约是两件事——后者是本地库，前者是外部服务。
+
+### 旁证：`url=` 覆盖仍然有效
+
+先建一个 URL **故意不可达**的订阅（`http://127.0.0.1:1/never`），下载时报"远端订阅错误"；但带 `url=http://127.0.0.1:13002/sub` 覆盖后 **200 且返回本地源的内容**。这印证 `04-sub-store.md` §1 第 4 条：**外部订阅源由 Agent 掌管，但订阅名必须先在库中存在**。
+
+### 对实现的约束
+
+1. Agent 必须写 Sub-Store 的库（备选②），或要求用户自建（备选①）。**没有第三条路**。
+2. 幂等性需自行实现（查 + 建），并处理 `DUPLICATE_KEY`。
+3. `content=` 仍有用：它让**离线或内网源**走通，且此时库中的 `url` 可以是个占位符。
+4. 库文件是 `sub-store.json`（`schemaVersion: "2.0"`），含 `subs/collections/artifacts/rules/files/tokens/...`。**Agent 不应直接改这个文件**——它属于 Sub-Store，直接写是在绕过对方的 schema 演进（见 O2）。
+
+| 关联 | ADR-002 D1/D4、`04-sub-store.md` §1/§3.1/§10 O2/O5 |
 
 ## Q024 — `route_localnet` / `ip_forward` 等 sysctl 的写权限如何处理？
 
@@ -284,15 +327,14 @@
 
 | 状态 | 数量 | 条目 |
 |---|---|---|
-| `RESOLVED` | 12 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用） |
+| `RESOLVED` | 13 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用）、**Q023**（2026-09-12：入库不可绕过，`content=` 只覆盖远端抓取） |
 | `PARTIAL` | 9 | Q001、Q004、Q011、Q017、Q018、Q019、Q021、Q022、Q025 |
-| `OPEN` | 5 | Q009、Q012、Q016、Q023、Q024 |
+| `OPEN` | 4 | Q009、Q012、Q016、Q024 |
 
 **结论**：Phase 0 的**架构阻塞项已全部解决**（Q002/Q003/Q006/Q007/Q008/Q010/Q013/Q014 均 `RESOLVED`）。剩余 `OPEN` 项均属于**实施细节或法律确认**，不阻塞 Domain Model 与 Application Ports 的设计，但必须在对应里程碑前收口：
 
 ```text
 Q016       → 内嵌前（ADR-006 D1）；Q015 已收口（默认不经镜像，只走上游 release 直连）
-Q023       → SubscriptionConverter Adapter 实现前（ADR-002 D4）
 Q009/Q004  → Linux/PVE 里程碑前（需真机）
 Q012/Q024  → 网络能力里程碑前
 ```
