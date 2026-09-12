@@ -24,6 +24,13 @@ use crate::exit::Exit;
 /// application's own 30-second readiness timeout.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long a stream may take to *open*.
+///
+/// Short: opening a stream is a local socket write, and the agent answers as soon
+/// as it has attached to the kernel. This bounds the connection attempt, not the
+/// stream's lifetime — once lines are arriving, the caller decides when to stop.
+pub const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Where the agent listens, when the environment does not say otherwise.
 pub const DEFAULT_SOCKET: &str = "/run/proxy-agent/agent.sock";
 
@@ -80,6 +87,15 @@ pub enum ClientError {
     /// The request could not be built or sent.
     #[error("request failed: {0}")]
     Transport(String),
+
+    /// The agent answered a non-success status before the stream opened.
+    #[error("the agent answered {status}: {detail}")]
+    Refused {
+        /// The HTTP status, which decides the exit code.
+        status: u16,
+        /// The response body, shortened for a terminal.
+        detail: String,
+    },
 }
 
 impl ClientError {
@@ -90,7 +106,12 @@ impl ClientError {
     /// that a retry or a service check addresses.
     #[must_use]
     pub const fn exit_code(&self) -> Exit {
-        Exit::DependencyUnreachable
+        match self {
+            // A rejection maps the same way it does for a non-streaming request,
+            // so `logs --level bad` exits like any other bad argument.
+            Self::Refused { status, .. } => Exit::from_status(*status),
+            Self::Unreachable { .. } | Self::Transport(_) => Exit::DependencyUnreachable,
+        }
     }
 }
 
@@ -140,6 +161,61 @@ impl Client {
         &self.socket
     }
 
+    /// Opens a streaming response, delivering the body one line at a time.
+    ///
+    /// # Why this needs its own client
+    ///
+    /// [`send`](Self::send) applies a total request timeout, which is right for a
+    /// request that answers once. A log stream answers for as long as the caller
+    /// watches, so a total timeout would cut it off mid-stream and look like the
+    /// agent had failed. This builds a client without one; the bound on
+    /// establishing the connection is supplied separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Unreachable`] when the socket cannot be connected,
+    /// and [`ClientError::Transport`] when the response head is unusable.
+    pub async fn stream(&self, path: &str) -> Result<LineStream, ClientError> {
+        let http = reqwest::Client::builder()
+            .unix_socket(self.socket.clone())
+            // Bounded only until the response head arrives. `reqwest` applies this
+            // to the whole exchange, so it is stated once here and the caller
+            // stops reading when it wants to stop.
+            .timeout(STREAM_OPEN_TIMEOUT)
+            .build()
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+
+        let url = format!("http://localhost{path}");
+        let response = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ClientError::Unreachable {
+                socket: self.socket.display().to_string(),
+                reason: describe_connect_error(&e),
+            })?;
+
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = response.text().await.unwrap_or_default();
+            // The status is preserved rather than flattened into a transport
+            // error, because it is what decides the exit code: a `400` from a
+            // mistyped level is the caller's mistake, while a `502` means the
+            // agent could not reach the kernel. Reporting both as "unreachable"
+            // would send an operator to check a service that is running fine.
+            return Err(ClientError::Refused {
+                status,
+                detail: short_body(&body),
+            });
+        }
+
+        Ok(LineStream {
+            inner: Box::pin(response.bytes_stream()),
+            buffer: String::new(),
+            done: false,
+        })
+    }
+
     /// Sends a request.
     ///
     /// # Errors
@@ -181,6 +257,80 @@ impl Client {
         let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
         Ok(Response { status, body })
+    }
+}
+
+/// The first line of a body, for an error message.
+fn short_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "no body".to_owned();
+    }
+    trimmed.lines().next().unwrap_or(trimmed).to_owned()
+}
+
+/// A stream of lines from the agent.
+///
+/// Deliberately not an `async fn` returning a `Vec`: the point of this type is
+/// that lines are delivered as they arrive, so `logs -f` can print one line and
+/// then wait indefinitely rather than buffering until the connection closes.
+pub struct LineStream {
+    /// The response body as it arrives. Boxed because the exact type
+    /// `reqwest::Response::bytes_stream` returns is opaque.
+    inner: std::pin::Pin<
+        Box<dyn futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>,
+    >,
+    buffer: String,
+    done: bool,
+}
+
+impl LineStream {
+    /// Returns the next line, or `None` when the stream has ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Transport`] when reading fails mid-stream, which is
+    /// how the caller learns the agent went away rather than that the log ended.
+    pub async fn next_line(&mut self) -> Result<Option<String>, ClientError> {
+        use futures_util::StreamExt as _;
+
+        loop {
+            // A complete line may already be buffered from an earlier read.
+            if let Some(index) = self.buffer.find('\n') {
+                let line: String = self.buffer.drain(..=index).collect();
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                return Ok(Some(trimmed.to_owned()));
+            }
+
+            if self.done {
+                // A trailing line with no newline is still a line.
+                let tail = self.buffer.trim().to_owned();
+                self.buffer.clear();
+                return Ok((!tail.is_empty()).then_some(tail));
+            }
+
+            match self.inner.next().await {
+                Some(Ok(bytes)) => {
+                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                Some(Err(e)) => {
+                    return Err(ClientError::Transport(format!("stream read failed: {e}")));
+                }
+                None => self.done = true,
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for LineStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LineStream")
+            .field("done", &self.done)
+            .field("buffered", &self.buffer.len())
+            .finish()
     }
 }
 

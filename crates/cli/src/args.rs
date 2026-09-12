@@ -243,7 +243,14 @@ pub struct AuditArgs {
 /// The `logs` arguments.
 #[derive(Debug, Args)]
 pub struct LogsArgs {
-    /// Keep the stream open.
+    /// Minimum level to show.
+    #[arg(long, value_name = "LEVEL")]
+    pub level: Option<String>,
+
+    /// Keep the stream open, rather than stopping at the first line.
+    ///
+    /// The command streams either way; this states the intent explicitly so a
+    /// supervisor or script that wants a long-lived stream can say so.
     #[arg(short = 'f', long)]
     pub follow: bool,
 }

@@ -757,23 +757,71 @@ impl Command for Audit {
     }
 }
 
-/// `logs` — not implemented.
+/// `logs` — the kernel's log stream.
+///
+/// # Not a [`Command`]
+///
+/// Every other command issues one request and renders one response. This one
+/// holds a connection open and prints lines as they arrive, so it has no
+/// `render` step to speak of and is driven directly by the dispatcher. Forcing it
+/// into the trait would give every other command a streaming concern it does not
+/// have.
 #[derive(Debug, Clone)]
-pub struct Logs;
-
-/// The message `logs` prints.
-pub const LOGS_NOT_IMPLEMENTED: &str = "logs are not available yet: the agent does not expose a log \
-     stream. This will need the observer port (ADR-003), which is not implemented.";
+pub struct Logs {
+    /// The minimum level, or `None` for the server's default.
+    pub level: Option<String>,
+}
 
 impl Logs {
-    /// The exit code `logs` uses.
-    ///
-    /// Its own code rather than a generic failure, because a script that tails
-    /// logs wants to detect the stub and fall back — for example, to reading the
-    /// journal — rather than reporting a broken deployment.
+    /// The path this command requests.
     #[must_use]
-    pub const fn exit_code() -> Exit {
-        Exit::NotImplemented
+    pub fn path(&self) -> String {
+        match &self.level {
+            Some(level) => format!("{API_PREFIX}/logs?level={level}"),
+            None => format!("{API_PREFIX}/logs"),
+        }
+    }
+}
+
+/// Formats one streamed line for a terminal.
+///
+/// The server sends `{"level":"...","message":"..."}`. Printing the whole object
+/// would be unreadable, and printing only the message would drop the severity,
+/// which is the main reason to filter or skim. So the level is shown as a short
+/// tag and the message follows.
+///
+/// A line that is not the expected shape is printed as-is rather than dropped: the
+/// caller asked for output, and a line whose shape is unfamiliar is still output.
+#[must_use]
+pub fn format_log_line(line: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(value) => {
+            let level = value
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("info");
+            let message = value.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{:<7} {message}", short_level(level))
+        }
+        Err(_) => line.to_owned(),
+    }
+}
+
+/// Shortens a level label to four characters so the column lines up.
+fn short_level(level: &str) -> &str {
+    match level.to_ascii_lowercase().as_str() {
+        "debug" => "DEBUG",
+        "info" => "INFO",
+        "warning" => "WARN",
+        "error" => "ERROR",
+        // An unfamiliar level is shown as-is, truncated to keep the column.
+        _ => {
+            if level.len() > 5 {
+                &level[..5]
+            } else {
+                level
+            }
+        }
     }
 }
 
@@ -1170,14 +1218,63 @@ mod tests {
     }
 
     #[test]
-    fn logs_reports_not_implemented() {
-        assert_eq!(Logs::exit_code(), Exit::NotImplemented);
+    fn the_logs_path_carries_the_level_when_one_is_given() {
         assert_eq!(
-            Format::Json,
-            Format::Json,
-            "the format enum must stay comparable for dispatch"
+            Logs { level: None }.path(),
+            "/api/v1/logs",
+            "no level means the server's default"
         );
-        assert!(LOGS_NOT_IMPLEMENTED.contains("not available"));
+        assert_eq!(
+            Logs {
+                level: Some("warning".to_owned())
+            }
+            .path(),
+            "/api/v1/logs?level=warning"
+        );
+    }
+
+    /// A streamed line is rendered with its severity, because the severity is the
+    /// reason to filter and the first thing a reader scans.
+    #[test]
+    fn a_log_line_is_rendered_with_its_level() {
+        assert_eq!(
+            format_log_line("{\"level\":\"error\",\"message\":\"bind failed\"}"),
+            "ERROR   bind failed"
+        );
+        assert_eq!(
+            format_log_line("{\"level\":\"warning\",\"message\":\"slow\"}"),
+            "WARN    slow"
+        );
+        assert_eq!(
+            format_log_line("{\"level\":\"info\",\"message\":\"started\"}"),
+            "INFO    started"
+        );
+        assert_eq!(
+            format_log_line("{\"level\":\"debug\",\"message\":\"detail\"}"),
+            "DEBUG   detail"
+        );
+    }
+
+    /// A line whose shape is unfamiliar is printed rather than dropped: the caller
+    /// asked for output, and an unexpected shape is still output.
+    #[test]
+    fn an_unexpected_line_is_printed_as_it_arrived() {
+        assert_eq!(format_log_line("not json"), "not json");
+        assert_eq!(format_log_line(""), "");
+        // A missing level is treated as the default the server uses.
+        assert_eq!(
+            format_log_line("{\"message\":\"no level here\"}"),
+            "INFO    no level here"
+        );
+    }
+
+    /// A level the kernel does not define must not panic on the fixed-width column.
+    #[test]
+    fn an_unfamiliar_level_does_not_break_the_column() {
+        let rendered = format_log_line("{\"level\":\"trace\",\"message\":\"x\"}");
+        assert!(rendered.starts_with("trace"), "{rendered}");
+        let long = format_log_line("{\"level\":\"extraordinarily-long\",\"message\":\"x\"}");
+        assert!(long.len() < 40, "the column must stay bounded: {long}");
     }
 
     #[test]

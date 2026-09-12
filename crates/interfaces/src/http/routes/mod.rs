@@ -7,6 +7,7 @@
 
 pub mod configs;
 pub mod jobs;
+pub mod logs;
 pub mod mihomo;
 pub mod subscriptions;
 pub mod system;
@@ -70,4 +71,8 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{API_PREFIX}/jobs"), get(jobs::list))
         .route(&format!("{API_PREFIX}/jobs/{{id}}"), get(jobs::get))
         .route(&format!("{API_PREFIX}/audit"), get(jobs::audit))
+        // The only streaming route. It holds the connection open, so it is
+        // deliberately not paginated or limited: the caller stops by
+        // disconnecting, which is what a stream is for.
+        .route(&format!("{API_PREFIX}/logs"), get(logs::logs))
 }

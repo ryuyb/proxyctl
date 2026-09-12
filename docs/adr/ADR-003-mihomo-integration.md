@@ -168,6 +168,37 @@ L5 可选数据面    → delay 测试（需显式触发，默认关闭以免产
 | `/storage` KV、`/dns/query` 结果 | Adapter |
 | `test_delay` 的 504 | **业务结果** `DelayOutcome::Timeout`，不是基础设施错误 |
 
+### D7. `MihomoObserver` 的实现形态（2026-09-12，阶段 C 前半）
+
+**实现状态：`KernelObserver` 已实现并接线**（`crates/infrastructure/src/mihomo/observer.rs`）。
+原 `UnavailableObserver` 占位与 `OBSERVER_REASON` 已删除。
+
+**用 NDJSON，不用 WebSocket。** 原占位说明写的是「观测流需要 websocket transport」——**这句是错的**，
+且方向性地误导。实测（R01 §3.3.2）四个观测端点在不带 `Upgrade: websocket` 时即为 NDJSON，
+WS 只在需要 `?token=` 的浏览器场景才需要。故无新增 WS 依赖。
+
+**`/logs` 使用 `format=structured`。** 两种格式实测都是 JSON，差别在字段名与时间：
+默认格式是 `type`/`payload`，structured 是 `level`/`message`/`fields`。选 structured 是因为字段名稳定；
+代价是 **`time` 只有 `HH:MM:SS`、没有日期**，因此 `LogEntry.at` 一律为 `None`，
+**不补当天日期**——跨午夜的补全会静默给出错误时间，而「不知道绝对时间」是诚实的。
+
+**传输层新增 `Transport::open_stream`，不改 `send`。** 两者完成语义不同：`send` 等 body 结束，
+而观测 body 永不结束（`Transfer-Encoding: chunked`）。折叠成一个带 mode flag 的方法会让每个调用方
+都要考虑自己可能拿到哪种 body。unix 侧手写 chunked 解码（`mihomo/framing.rs`），HTTP 侧用
+`reqwest` 的解码。**两个超时是独立的**：连接建立有界，流空闲无界——`/logs` 在空闲实例上
+长时间不刷响应头，把空闲当超时会把「安静」误报为故障。
+
+**脱敏在 Adapter 层完成**，用 `proxy_application::redaction`。它与既有两个 `redact` 语义不同：
+错误信息里的 `redact` 替换整个 URL（读者只需知道「涉及了一个 URL」），而日志需要**保留 URL 结构**
+（host、path 是诊断信息），只替换凭据值。三个调用方三个问题，是三个函数而非重复。
+已真机验证：内核自身日志含 `token=SUPERSECRETVALUE`，经 Agent 流出的同一行变为 `token=<redacted>`，
+URL 其余部分完整。
+
+**「未采样」与「零」必须区分。** `/memory` 首帧 `{"inuse":0}` 是占位（尚未采样），被跳过；
+`/traffic` 空闲时 `up:0` 是**真实增量**，被保留。两者形状相同、含义相反。
+
+**观测不进状态机**（D1 的既有结论）：流断开不产生 `last_failure`、不触发回滚、不写审计。
+
 ---
 
 ## 3. Alternatives

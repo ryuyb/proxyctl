@@ -5,7 +5,8 @@
 //! easier to assert here than through a process boundary.
 
 use crate::args::{
-    AgentAction, AgentArgs, Cli, ConfigCommand, MihomoCommand, SubscriptionCommand, TopCommand,
+    AgentAction, AgentArgs, Cli, ConfigCommand, LogsArgs, MihomoCommand, SubscriptionCommand,
+    TopCommand,
 };
 use crate::command::{self, Command, Format};
 use crate::exit::Exit;
@@ -54,11 +55,11 @@ pub async fn run(cli: Cli) -> Exit {
         };
     }
 
-    // `logs` has no request behind it, so it is answered before a client is built.
-    // It reports its own absence rather than pretending to have produced output.
-    if matches!(cli.command, TopCommand::Logs(_)) {
-        eprintln!("{}", command::LOGS_NOT_IMPLEMENTED);
-        return command::Logs::exit_code();
+    // `logs` streams rather than rendering, so it is driven here instead of being
+    // modelled as a `Command`. See `command::Logs` for why it does not fit the
+    // trait that every other command implements.
+    if let TopCommand::Logs(args) = &cli.command {
+        return stream_logs(&cli.socket, args, format).await;
     }
 
     let Some(command) = build(&cli.command) else {
@@ -116,6 +117,83 @@ pub async fn run(cli: Cli) -> Exit {
                 code
             }
         },
+    }
+}
+
+/// Streams the kernel's logs to standard output.
+///
+/// # `-f` semantics
+///
+/// Without `-f` the command prints until it is interrupted, because a log is not a
+/// document with an end: asking for "the logs" and getting a blocking stream is
+/// what every operator expects from `logs`. `-f` is accepted and makes that
+/// explicit — it is the same behaviour, stated deliberately, so a script written
+/// against `logs -f` means what it says.
+///
+/// The command ends when the stream ends (the agent went away, or the kernel
+/// restarted) or when the caller interrupts it. An interrupted stream is a normal
+/// way to stop, so it is not an error.
+async fn stream_logs(socket: &Option<std::path::PathBuf>, args: &LogsArgs, format: Format) -> Exit {
+    let path = command::Logs {
+        level: args.level.clone(),
+    }
+    .path();
+
+    let socket = client::resolve_socket(socket.as_deref());
+    let client = match client::Client::new(socket) {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("proxyctl: {e}");
+            return e.exit_code();
+        }
+    };
+
+    let mut stream = match client.stream(&path).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            eprintln!("proxyctl: {e}");
+            return e.exit_code();
+        }
+    };
+
+    let as_json = format == Format::Json;
+
+    // Interrupting a stream is how a person stops watching, so SIGINT is handled
+    // to return success rather than letting the default disposition look like a
+    // crash. Only the first signal is intercepted: the handler is installed once
+    // per loop iteration and the process exits on the first, so a stream that will
+    // not settle can still be abandoned with a second signal.
+    loop {
+        let next = tokio::select! {
+            line = stream.next_line() => line,
+            _ = tokio::signal::ctrl_c() => return Exit::Success,
+        };
+
+        match next {
+            Ok(Some(line)) => {
+                if as_json {
+                    // The raw NDJSON line, unchanged: the same rule as every other
+                    // command's `--json`.
+                    println!("{line}");
+                } else {
+                    println!("{}", command::format_log_line(&line));
+                }
+            }
+            Ok(None) => {
+                // The body ended. Without `-f` that means the agent closed the
+                // stream, which happens when the kernel it was attached to goes
+                // away; reporting success would hide a stopped agent.
+                return if args.follow {
+                    Exit::Success
+                } else {
+                    Exit::DependencyUnreachable
+                };
+            }
+            Err(e) => {
+                eprintln!("proxyctl: {e}");
+                return e.exit_code();
+            }
+        }
     }
 }
 
@@ -184,19 +262,51 @@ mod tests {
     use crate::args::Cli;
     use clap::Parser as _;
 
-    /// `logs` reports itself as not implemented, with the code that says so.
+    /// `logs` is a real stream now, so with no agent it reports the *agent* as
+    /// unreachable. It must not fall back to "not implemented": an operator who
+    /// sees the wrong one of those goes looking for the wrong problem.
     #[tokio::test]
-    async fn logs_is_not_implemented() {
-        let cli = Cli::try_parse_from(["proxyctl", "logs"]).expect("parse");
-        assert_eq!(run(cli).await, Exit::NotImplemented);
+    async fn logs_without_an_agent_reports_it_unreachable() {
+        let cli = Cli::try_parse_from([
+            "proxyctl",
+            "--socket",
+            "/tmp/definitely-not-a-socket",
+            "logs",
+        ])
+        .expect("parse");
+        assert_eq!(run(cli).await, Exit::DependencyUnreachable);
     }
 
-    /// `logs -f` is the same answer: following a stream that does not exist cannot
-    /// succeed.
+    /// `logs -f` behaves the same way when the agent is absent, and must accept the
+    /// flag: the streaming path does not depend on it, but a caller that wants a
+    /// long-lived stream has to be able to say so.
     #[tokio::test]
-    async fn logs_follow_is_also_not_implemented() {
-        let cli = Cli::try_parse_from(["proxyctl", "logs", "-f"]).expect("parse");
-        assert_eq!(run(cli).await, Exit::NotImplemented);
+    async fn logs_follow_without_an_agent_reports_it_unreachable() {
+        let cli = Cli::try_parse_from([
+            "proxyctl",
+            "--socket",
+            "/tmp/definitely-not-a-socket",
+            "logs",
+            "-f",
+        ])
+        .expect("parse");
+        assert_eq!(run(cli).await, Exit::DependencyUnreachable);
+    }
+
+    /// A level is passed through in the request path, so a typo reaches the server
+    /// and is refused there with the message that names the valid levels — rather
+    /// than being silently defaulted by the client.
+    #[tokio::test]
+    async fn logs_passes_the_level_through() {
+        let args = crate::args::LogsArgs {
+            level: Some("warning".to_owned()),
+            follow: false,
+        };
+        let path = command::Logs {
+            level: args.level.clone(),
+        }
+        .path();
+        assert_eq!(path, "/api/v1/logs?level=warning");
     }
 
     /// A `config validate` whose file cannot be read is a usage failure — the
