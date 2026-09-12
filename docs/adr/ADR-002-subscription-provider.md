@@ -120,8 +120,30 @@ pub trait SubscriptionConverter: Send + Sync {
 ### 4.2 负面 / 成本
 
 - Agent 必须实现"配置骨架补全 + proxy-groups + rules"逻辑，工作量不小（这是 C3 的直接后果）。
-- 两段式写入意味着 Agent 需要在 Sub-Store 中维护订阅映射（幂等命名，如 `proxy-agent-<sub_id>`）。
+- 两段式写入意味着 Agent 需要在 Sub-Store 中维护订阅映射。**2026-09-12 修正**：实测 `PATCH /api/sub/:name` 会
+  **连带更新引用该订阅的 collections / artifacts / files**，所以 Agent **只需保证注册名稳定**，
+  **不需要**本地映射表，也不需要自己去改那些引用（重复做会与服务的维护打架）。
+  注册名由**源 URL 的纯函数**派生（`proxy-agent-<16 位 hex>`），因后端拒绝含 `/` 的名字（实测 500 `INVALID_NAME`）。
+  幂等靠 `PATCH` 先试、404 才 `POST`；**不用 `PUT /api/subs`**——它全量替换，共享实例上具破坏性。
 - 需要在 doctor 中额外检测 Sub-Store 可达性、监听地址、版本。
+
+### 4.2.1 实现状态（2026-09-12）
+
+| 实现 | 状态 |
+|---|---|
+| `SubStoreConverter` | ✅ 已实现（`crates/infrastructure/src/subscription/substore.rs`） |
+| `NativeConverter` | 未实现，按 D1 保留最小直连降级的接口位 |
+
+真机验证（Debian aarch64 + Sub-Store **v2.39.6**）：
+- `health()` 读出真实版本；一次转换从真实源得到 **2 个节点**
+- 不可达源被分类为 `Unreachable`（而非 `InvalidRequest`），且源 URL 被 **`<redacted-url>` 脱敏**
+- **幂等**：重复转换后库中记录数不变（4 → 4）
+
+错误映射（实测对应）：`404` → `SubscriptionNotFound`；`500` + 远端抓取失败 → `Unreachable`；
+空/零节点 → `EmptyOrInvalidOutput`；不支持的 target → `UnsupportedTarget`。
+
+安全：新增 `ConverterConfig::External::allow_non_loopback`（默认 **false**）。后端**完全无认证**，
+故非 loopback 一律拒绝，除非运维显式接受暴露面；adapter 自身**再次校验**，不依赖上层已检查。
 
 ### 4.3 必须遵守
 
