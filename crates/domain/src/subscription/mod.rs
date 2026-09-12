@@ -13,4 +13,6 @@ pub mod subscription;
 pub use conversion::{ConvertedProxies, TargetFormat};
 pub use schedule::{Interval, Schedule};
 pub use source::{SubscriptionSource, SubscriptionUrl};
-pub use subscription::{Subscription, UpdateFailure, UpdateOutcome, UpdateRecord};
+pub use subscription::{
+    Subscription, SubscriptionState, UpdateFailure, UpdateOutcome, UpdateRecord,
+};

@@ -242,6 +242,8 @@ pub mod configs;
 pub mod instances;
 pub mod jobs;
 pub mod schema;
+pub mod secrets;
+pub mod subscriptions;
 
 #[cfg(test)]
 mod tests;
