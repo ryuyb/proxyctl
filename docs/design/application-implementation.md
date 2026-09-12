@@ -1103,3 +1103,58 @@ cargo build --workspace
 | `HealthReport` 的确切字段 | 依赖 R01 的 `/configs` 字段限制（33 字段）与 L4 端口探测设计 | 实现阶段（infrastructure 定形后） |
 | `KernelInstaller::verify` 的校验强度 | 依赖 Q005/Q015（上游是否提供签名） | 打包前 |
 | 是否把 `InstanceLocks` 提升为 bootstrap 单例以支持多实例 | MVP 单实例；类型已支持 | 多实例里程碑 |
+
+---
+
+## 12. 实现状态（Application 层已落地）
+
+```text
+阶段 1–5 与 6–7（ports / jobs / locks / ActivateConfig / RollbackConfig）：已实现
+```
+
+**产物**：`crates/application/`，`proxy-application` crate。
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 格式 | `cargo fmt --check` | PASS |
+| 静态检查 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS |
+| 测试 | `cargo test --workspace --all-features` | **243 passed**（domain 146 + application 97） |
+| 构建 | `cargo build --workspace --all-features` | PASS |
+| 依赖纯度 | `cargo tree -p proxy-application` | 仅 `proxy-domain` + `thiserror` + `async-trait` + `tokio(sync)` + `futures-core` |
+
+**测试分布**：ports 单元测试 65、`activation.rs` 18、`concurrency.rs` 8、architecture 守卫 6。
+
+### 12.1 与本文档设计的差异（实现期修正）
+
+| 项 | 文档原设计 | 实现 | 原因 |
+|---|---|---|---|
+| 校验失败的返回值 | 未明确 | **不是 Err**，而是 `Ok { succeeded: false }` | 校验拒绝不改动任何状态，没有状态需要恢复。返回 `Err` 会迫使调用方为最常见的输入错误写特例（由 5 个失败测试暴露） |
+| `AppContext` 进程句柄 | 未列出 | 新增 `ProcessState` 字段 | 内核不 daemonize、不写 pid 文件，Agent 内存中的 handle 是唯一真相；回滚需要它来 restart |
+| `ConfigValidator::preflight` | 接收候选配置 | 接收 `&ConfigBody` + `&PreflightContext` | 避免 Port 依赖 domain 的 typestate 类型，使 adapter 无法"看到"校验状态 |
+| `test_support` | 文档写 `#[cfg(test)]` 或 feature | **feature 门控** `test-support`（默认关闭） | 集成测试在其他 crate 中，`#[cfg(test)]` 不可见；同时保证 shipping 构建不含测试脚手架 |
+| `PortError` 可克隆性 | 未考虑 | 不可 `Clone`；测试替身存普通数据、调用时构造错误 | `Box<dyn Error>` 不实现 `Clone`；替身改存 `ReloadOutcome`/`HealthBehaviour` 枚举 |
+| 空流替身 | 计划用 `futures-util` | 手写 `EmptyStream<T>` | 避免为测试替身引入真实依赖（`futures-core` 不提供 `empty()`） |
+
+### 12.2 关键不变量与对应测试
+
+| 不变量 | 测试 |
+|---|---|
+| 失败/拒绝的校验不触碰内核 | `preflight_failure_never_reaches_the_kernel`、`syntax_…`、`semantic_…` |
+| 端口冲突在预检拦截 | `port_conflict_is_caught_by_the_preflight_layer` |
+| `save` 先于 `set_active` | `successful_activation_persists_activates_and_reports_health` |
+| 审计先于 `ConfigActivated` 事件 | `audit_is_written_before_the_activation_event` |
+| reload 用 payload 而非 path | `activation_searches_the_kernel_by_payload_not_path` |
+| reload 被拒 → 回滚 | `rejected_reload_triggers_recovery` |
+| 僵尸态（controller 通、端口不通）→ 回滚 | `degraded_health_triggers_recovery` |
+| 回滚用 restart 而非 reload | `recovery_restarts_rather_than_reloading` |
+| 回滚不停机 | `recovery_never_stops_the_kernel_permanently` |
+| 无法确认时报告观测值 | `unconfirmable_recovery_reports_observed_state` |
+| 审计失败不阻断、但可见 | `audit_failure_degrades_without_failing_the_operation` |
+| 并发激活被串行化 | `concurrent_activations_do_not_interleave` |
+| 失败/成功都释放实例锁 | `instance_lock_is_released_after_*` |
+| 同一订阅并发更新被抑制 | `concurrent_subscription_updates_are_suppressed` |
+| 每个 job 都到达终态 | `jobs_always_reach_a_terminal_state` |
+
+### 12.3 尚未实现
+
+按 §10，以下仍未实现：生命周期命令（start/stop/restart/reload）、`UpdateSubscription` 与订阅 CRUD、只读 queries、`UpdateKernel`。Ports、锁、job/事件模型、`ActivateConfig`、`RollbackConfig` 已就绪，可作为它们的基础。
