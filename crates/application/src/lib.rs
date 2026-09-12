@@ -36,6 +36,7 @@
 
 pub mod commands;
 pub mod context;
+pub mod context_builder;
 pub mod error;
 pub mod locks;
 pub mod ports;
@@ -46,10 +47,11 @@ pub mod queries;
 /// Behind the `test-support` feature so production builds exclude it. The
 /// doubles are not `#[cfg(test)]` because integration tests in other crates
 /// (and infrastructure tests) need to reuse them.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-doubles"))]
 pub mod test_support;
 
 pub use context::{AppContext, ProcessState};
+pub use context_builder::{AppContextBuilder, MissingDependency};
 pub use error::ApplicationError;
 
 /// How long to wait for a graceful kernel stop before forcing termination.

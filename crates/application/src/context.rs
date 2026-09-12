@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex};
 use crate::locks::{InstanceLocks, SubscriptionGuards};
 use crate::ports::process_manager::{ProcessHandle, StartOptions};
 use crate::ports::{
-    AuditSink, CapabilityProbe, ConfigRepository, ConfigValidator, EventPublisher, JobRegistry,
-    KernelInstaller, MihomoConnectionOps, MihomoController, MihomoObserver, ProcessManager,
-    SecretStore, ServiceManager, SubscriptionConverter, SubscriptionRepository,
+    AuditSink, CapabilityProbe, ConfigRepository, ConfigValidator, EventPublisher,
+    InstanceRepository, JobRegistry, KernelInstaller, MihomoConnectionOps, MihomoController,
+    MihomoObserver, ProcessManager, SecretStore, ServiceManager, SubscriptionConverter,
+    SubscriptionRepository,
 };
 use proxy_domain::shared::id::MihomoInstanceId;
 
@@ -98,12 +99,29 @@ pub struct AppContext {
     pub kernel: Arc<dyn KernelInstaller>,
     /// Event publication.
     pub events: Arc<dyn EventPublisher>,
+    /// Lifecycle state storage.
+    pub instances: Arc<dyn InstanceRepository>,
     /// Per-instance serialization.
     pub locks: Arc<InstanceLocks>,
     /// Per-subscription update suppression.
     pub guards: Arc<SubscriptionGuards>,
     /// The kernel process this agent supervises.
     pub process_state: Arc<Mutex<ProcessState>>,
+}
+
+impl std::fmt::Debug for AppContext {
+    /// Lists the wired dependencies.
+    ///
+    /// The trait objects themselves are not printable, but knowing *that* each
+    /// dependency is present — and for which instance — is what makes a failed
+    /// assertion readable.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppContext")
+            .field("instance", &self.instance)
+            .field("dependencies", &"16 ports wired")
+            .field("process_state", &self.process_state)
+            .finish()
+    }
 }
 
 impl AppContext {

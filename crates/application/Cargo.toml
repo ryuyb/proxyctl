@@ -27,9 +27,15 @@ tokio = { workspace = true, features = ["sync", "time"] }
 futures-core.workspace = true
 
 [features]
-# Exposes in-memory doubles that also allow fault injection, so failure paths can
-# be tested. Off by default: shipping builds must not carry test scaffolding.
-test-support = []
+# In-memory implementations of every port: enough to assemble a working
+# AppContext with no external system. This is what the bootstrap layer needs to
+# prove the wiring compiles and runs.
+test-doubles = []
+
+# The doubles plus fault injection and call recording, for asserting failure
+# behaviour. Superset of `test-doubles`, and the only one that should ever appear
+# in a test-only dependency.
+test-support = ["test-doubles"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
