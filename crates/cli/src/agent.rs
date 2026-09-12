@@ -36,16 +36,10 @@ use crate::exit::Exit;
 /// has no interface, and running without one would look like a working service
 /// to every supervisor.
 pub async fn run(config: RuntimeConfig) -> Result<(), Exit> {
-    // The socket path is reported before anything can fail, so a failed start
-    // still says which path was attempted.
-    let socket = config.agent_socket_path();
-
     let (context, events) = Bootstrap::build_real_with_events(&config)
         .await
         .map_err(|e| report("cannot compose the agent", &e.to_string()))?;
     let context = std::sync::Arc::new(context);
-
-    println!("proxy-agent listening on {socket}");
 
     // The kernel-log forwarder runs only when the deployment asked for it. Its
     // cost is real — every kernel log line is read and redacted whether or not
@@ -100,7 +94,29 @@ pub async fn run_with_context(
     events: Option<std::sync::Arc<dyn proxy_interfaces::http::state::EventSource>>,
     shutdown_channel: (watch::Sender<bool>, watch::Receiver<bool>),
 ) -> Result<(), Exit> {
-    let server = proxy_bootstrap::build_http_server(context, config, events)
+    // A TCP caller is identified by nothing but its token, so the listener decision
+    // needs to know whether any exists. A store read failure is treated as "no
+    // tokens": refusing to start on a read error would make a read-only problem
+    // fatal, and this direction errs toward refusing to listen rather than toward
+    // listening unguarded.
+    let has_tokens = match context.secrets.list_api_tokens().await {
+        Ok(tokens) => !tokens.is_empty(),
+        Err(e) => {
+            eprintln!("proxyctl: cannot read the token store: {e}");
+            false
+        }
+    };
+
+    // Printed at every start rather than once: the situations they describe stay
+    // true for as long as the deployment does, and a warning seen only on the
+    // first run is one nobody reads.
+    for warning in
+        proxy_bootstrap::listener::warnings(config.api_bind.as_deref(), &config.cors_origins)
+    {
+        eprintln!("proxyctl: warning: {warning}");
+    }
+
+    let server = proxy_bootstrap::build_http_server(context, config, events, has_tokens)
         .map_err(|e| report("cannot build the listener", &e.to_string()))?;
 
     let (shutdown_tx, shutdown_rx) = shutdown_channel;

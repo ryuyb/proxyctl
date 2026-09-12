@@ -27,6 +27,7 @@ pub mod command;
 pub mod dispatch;
 pub mod exit;
 pub mod runtime;
+pub mod token;
 
 pub use command::{Command, Format, Request};
 pub use exit::Exit;

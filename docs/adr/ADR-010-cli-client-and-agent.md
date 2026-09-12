@@ -115,6 +115,36 @@ proxyctl agent run      守护进程：组装 context，服务 socket
 
 `RuntimeConfig` 中已有的 `mihomo_secret` 字段保持不动，只增加文件这一入口；`RealFactory::new` 对「loopback 且 secret 空」的硬拒保留，作为第二道防线。
 
+### D9：TCP 监听与 token（2026-09-12）
+
+**默认不监听。** `[api] bind` 省略即只有 unix socket。绑定端口是一个显式动作。
+
+**硬校验只有一条，无例外**：监听 TCP ⇒ 必须已存在至少一个 token，否则**拒绝启动**（退出码 1）。
+
+**loopback 不豁免**——这是最容易被质疑的一条，故写明理由：
+
+- socket 上调用者身份由**内核**给出（`SO_PEERCRED` + 文件权限）；TCP 上没有任何东西可问，
+  **token 就是身份本身**。没有 token 时，每个请求要么被拒（agent 无法被控制），
+  要么被接受（agent 谁都能控制），两者只差一个漏掉的检查。
+- **loopback 不是信任边界**：任何本地进程（包括共享网络命名空间的容器内进程）都能访问 `127.0.0.1`。
+  说「只是本机」等于引入一个比 socket 弱得多的假设。
+- **一条规则只有一个验证点。** 带条件的规则有第二条路径，而错误就住在那条路径上。
+
+**token 存哈希，不存明文。** 迁移前实测确认 `api_principals` 在所有数据库中都是 0 行，
+即该功能从未真正可用（没有 listener，`Role` 无来源），故直接改 schema，无需就地哈希化。
+
+用 SHA-256 + 每行独立 salt，而**不是** Argon2/bcrypt：token 是 `generate_secret` 生成的
+高熵随机值，不是人类密码——没有字典可攻，而慢哈希会拖慢每个请求。salt 逐行独立，
+使两份数据库无法互相比对。schema 版本 2 → 3。
+
+**`Role` 至此第一次有真实来源。** 此前所有连接都是 `Admin`（socket 天然可信），
+所以 connections 的隐私过滤与 events 的日志过滤**写了但从未真正生效**；现在它们可达了。
+
+**token 三条命令不走 socket**（`proxyctl token issue|list|revoke`）：token 是监听器**被允许存在**的前提，
+所以签发必须能在 agent 起来之前工作，包括全新安装。这是唯一直接打开元数据数据库的命令。
+数据库访问放在 `proxy-bootstrap`（组合根），因为 CLI 客户端那半边**不允许**依赖 storage 适配器——
+架构测试强制这一点。
+
 ## Alternatives
 
 ### A1：两个二进制（`proxyctl` + `proxy-agent`）

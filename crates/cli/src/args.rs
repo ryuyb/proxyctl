@@ -88,6 +88,79 @@ pub enum TopCommand {
 
     /// Follow the agent's event stream.
     Events(EventsArgs),
+
+    /// Manage API tokens for the network listener.
+    #[command(subcommand)]
+    Token(TokenCommand),
+}
+
+/// The `token` subcommands.
+///
+/// These act on the agent's own database rather than over the socket, which is why
+/// they take `--config` instead of `--socket`: issuing a token is how a deployment
+/// is prepared, and it must work before any listener is running.
+#[derive(Debug, Subcommand)]
+pub enum TokenCommand {
+    /// Issue a token, printing it once.
+    Issue(TokenIssueArgs),
+    /// List principals, without their tokens.
+    List(TokenListArgs),
+    /// Revoke a principal's token.
+    Revoke(TokenRevokeArgs),
+}
+
+/// The `token issue` arguments.
+#[derive(Debug, Args)]
+pub struct TokenIssueArgs {
+    /// The configuration file, used to find the database.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// The principal's name.
+    #[arg(long, value_name = "NAME")]
+    pub principal: String,
+
+    /// The role granted.
+    #[arg(long, value_enum, default_value_t = TokenRole::Admin)]
+    pub role: TokenRole,
+}
+
+/// The `token list` arguments.
+#[derive(Debug, Args)]
+pub struct TokenListArgs {
+    /// The configuration file, used to find the database.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// The `token revoke` arguments.
+#[derive(Debug, Args)]
+pub struct TokenRevokeArgs {
+    /// The configuration file, used to find the database.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// The principal to revoke.
+    #[arg(long, value_name = "NAME")]
+    pub principal: String,
+}
+
+/// A role a token can grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum TokenRole {
+    /// Full control.
+    Admin,
+    /// Read-only access to status, connections, and reports.
+    ReadOnly,
+}
+
+impl From<TokenRole> for proxy_application::ports::secret_store::Role {
+    fn from(role: TokenRole) -> Self {
+        match role {
+            TokenRole::Admin => Self::Admin,
+            TokenRole::ReadOnly => Self::ReadOnly,
+        }
+    }
 }
 
 /// The `agent` subcommand.

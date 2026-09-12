@@ -86,9 +86,9 @@ external-controller-cors:
 | 通道 | MVP 方案 | 依据 |
 |---|---|---|
 | 本地 CLI/TUI | Unix socket `/run/proxy-agent/agent.sock`，`0660 root:proxyctl`，**并用 `SO_PEERCRED` 校验 uid/gid** | R12 §1（推荐）、R09 C8 |
-| Web（远程） | **Bearer token**（存储为哈希，可轮换）+ 严格 CORS 白名单；`ADMIN`/`READ_ONLY` 角色 | R12 §1 |
+| Web（远程） | **Bearer token**（SHA-256 + 逐行 salt，**已实现**）+ 严格 CORS 白名单；`ADMIN`/`READ_ONLY` 角色 | R12 §1、ADR-010 D9 |
 | 会话 cookie + CSRF、mTLS | 列入 Phase 2（不是 MVP） | R12 §1 |
-| 启动期硬校验 | **非 loopback 监听 ⇒ 必须已配置 token，否则拒绝绑定/拒绝启动** | R12 §1、REQ-SEC-004 |
+| 启动期硬校验 | **监听 TCP ⇒ 必须已签发 token，否则拒绝启动**（loopback **不豁免**；理由见 ADR-010 D9） | R12 §1、REQ-SEC-004 |
 
 ### D4. 权限模型（最小权限表）
 

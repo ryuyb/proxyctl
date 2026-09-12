@@ -124,6 +124,37 @@ Debian / Ubuntu + systemd + PVE LXC，x86_64 / aarch64
 
 **Mihomo 二进制**：作为 deb 的一部分（Bundled）或首次运行时由 Agent 下载，二者取一需在实现前定；若 Bundled 则必须满足 GPL-3.0 的源码提供义务（C9、R13 §7）。**E2E 验证项**。
 
+### D4b. 网络监听（2026-09-12 实现）
+
+**默认不监听 TCP。** 只有 unix socket，本地 CLI/TUI 可用，跨机访问需要显式开启：
+
+```toml
+[api]
+bind = "0.0.0.0:8765"                        # 省略整节 = 只有 socket
+cors_origins = ["https://ui.example.com"]   # 浏览器跨源白名单，空 = 不允许
+```
+
+**两条路径同时服务。** `bind` 是**增加**一个 listener，不是替换 socket：CLI 与 TUI 都走 socket，
+加了端口不等于要停掉本地工具。
+
+**硬校验（ADR-005 REQ-SEC-004）：监听 TCP ⇒ 必须已存在至少一个 token，否则拒绝启动（退出码 1）。**
+loopback **不豁免**，理由与实现见 ADR-010 D9。
+
+**跨机访问的最小配置**（这是最常被问到的场景）：
+
+```bash
+proxyctl token issue --config /etc/proxy-agent/config.toml --principal me --role admin
+# 把 bind 写进 /etc/proxy-agent/config.toml 后重启 agent
+# 另一台机器：http://<服务器IP>:8765
+```
+
+**公网访问不建议直接暴露。** API 是明文 HTTP，bearer token 会被路径上任何中间人读到。
+正确做法是 `bind` 到本机或 VPN 地址，由反向代理（Caddy/nginx）终结 TLS。
+启动时会对 off-host bind 打出这条警告。
+
+**CORS 精确匹配，无通配符，不反射 origin。** 空名单不发任何 CORS 头——同源页面照常工作，
+浏览器拦掉其余。通配符和反射都是「看起来像限制、实际放行所有人」。
+
 **构建目标**：`x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`；是否改用 musl 静态链接待评估（glibc 兼容性 vs 体积），列入 open-questions。
 
 ### D5. 三条独立升级链路（不可耦合）

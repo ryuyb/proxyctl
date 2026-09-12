@@ -6,7 +6,7 @@
 
 use crate::args::{
     AgentAction, AgentArgs, Cli, ConfigCommand, ConnectionsCommand, EventsArgs, LogsArgs,
-    MihomoCommand, SubscriptionCommand, TopCommand,
+    MihomoCommand, SubscriptionCommand, TokenCommand, TopCommand,
 };
 use crate::command::{self, Command, Format};
 use crate::exit::Exit;
@@ -67,6 +67,18 @@ pub async fn run(cli: Cli) -> Exit {
     // `Command`.
     if let TopCommand::Events(args) = &cli.command {
         return stream_events(&cli.socket, args, format).await;
+    }
+
+    // Token commands open the database directly rather than going over the socket:
+    // issuing a token is what makes a listener allowed to exist, so it must work
+    // before one is running. See the module for why.
+    match &cli.command {
+        TopCommand::Token(TokenCommand::Issue(args)) => return crate::token::issue(args).await,
+        TopCommand::Token(TokenCommand::List(args)) => {
+            return crate::token::list(&args.config).await;
+        }
+        TopCommand::Token(TokenCommand::Revoke(args)) => return crate::token::revoke(args).await,
+        _ => {}
     }
 
     // `connections close --all` needs an acknowledgement before anything is sent.
@@ -340,6 +352,7 @@ pub fn build(top: &TopCommand) -> Option<Box<dyn Command>> {
             id: args.id.clone(),
         }),
         TopCommand::Logs(_) | TopCommand::Events(_) | TopCommand::Agent(_) => return None,
+        TopCommand::Token(_) => return None,
     };
     Some(command)
 }
