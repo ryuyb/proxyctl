@@ -1,0 +1,49 @@
+[package]
+name = "proxyctl"
+description = "Client and agent entry point for the Mihomo management agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "proxyctl"
+path = "src/main.rs"
+
+# One binary, two roles: `proxyctl <command>` is a client, `proxyctl agent run`
+# is the daemon.
+#
+# The single artifact carries both halves, and that is a deliberate trade. It is
+# measured, not assumed: the aarch64 Linux release build is 8.7 MB stripped
+# (`.text` 6.7 MB, `.rodata` 2 MB) for the full daemon — axum, hyper, rusqlite
+# with the bundled SQLite, and reqwest with TLS. A client-only build of the same
+# crate is far smaller, so splitting the binary would save roughly two thirds of
+# the size. It is still not split, because the cost of splitting is a second
+# version that can skew against the daemon: the client and the server disagreeing
+# about a path or a field is how a 404 in production happens, and the architecture
+# test below (plus the route-table comparison) exists to make exactly that
+# impossible within one artifact.
+#
+# The client modules deliberately depend on nothing below the transport — see the
+# architecture test, which fails if `client/` reaches the application or domain.
+# That is what keeps "one artifact" from becoming "one tangled crate".
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { workspace = true, features = ["json"] }
+# Only the `agent run` path uses these.
+proxy-bootstrap = { path = "../bootstrap" }
+proxy-interfaces = { path = "../interfaces" }
+proxy-application = { path = "../application" }
+proxy-domain = { path = "../domain" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
