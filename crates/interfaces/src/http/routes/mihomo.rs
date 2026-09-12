@@ -136,6 +136,122 @@ pub async fn reload(
     }))
 }
 
+/// Installs a kernel version.
+///
+/// The sequence is fetch → verify → install, and each step is separate on
+/// purpose: verification must be able to fail *before* anything on disk changes,
+/// and the previous binary is retained so a rollout that breaks the kernel can be
+/// undone.
+///
+/// A version that is already installed is reported rather than re-fetched: the
+/// download is the expensive part, and re-installing the same bytes would achieve
+/// nothing.
+///
+/// # Errors
+///
+/// Returns a gateway error when the release cannot be reached, and a validation
+/// status when the artifact does not match its published digest.
+pub async fn update(
+    State(state): State<AppState>,
+    caller: Caller,
+    body: Option<Json<UpdateKernelBody>>,
+) -> Result<Json<KernelDto>, HttpError> {
+    require_write(&caller)?;
+
+    // Without a version, report what is installed: "update" with no target is a
+    // status question, not a request to guess a version.
+    let Some(Json(body)) = body else {
+        return current_kernel(&state).await.map(Json);
+    };
+
+    let version = proxy_domain::mihomo::MihomoVersion::parse(body.version)
+        .map_err(|e| HttpError::bad_request(e.to_string()))?;
+
+    if let Some(installed) = state.ctx.kernel.current().await?
+        && installed.version == version
+    {
+        return Ok(Json(KernelDto {
+            outcome: "already-installed".to_owned(),
+            version: installed.version.as_str().to_owned(),
+            binary_path: Some(installed.binary_path),
+            checksum: Some(installed.checksum.as_str().to_owned()),
+            reason: None,
+        }));
+    }
+
+    let artifact = state.ctx.kernel.fetch(&version).await?;
+    // Verification happens before the install, so a mismatch costs a download
+    // rather than a broken kernel.
+    state
+        .ctx
+        .kernel
+        .verify(&artifact, &artifact.checksum)
+        .await?;
+    let installed = state.ctx.kernel.install(&artifact).await?;
+
+    Ok(Json(KernelDto {
+        outcome: "installed".to_owned(),
+        version: installed.version.as_str().to_owned(),
+        binary_path: Some(installed.binary_path),
+        checksum: Some(installed.checksum.as_str().to_owned()),
+        reason: None,
+    }))
+}
+
+/// Reports the installed kernel.
+///
+/// # Errors
+///
+/// Returns a gateway error when the installation cannot be inspected.
+pub async fn get_kernel(
+    State(state): State<AppState>,
+    _caller: Caller,
+) -> Result<Json<KernelDto>, HttpError> {
+    current_kernel(&state).await.map(Json)
+}
+
+/// Reads the current installation.
+async fn current_kernel(state: &AppState) -> Result<KernelDto, HttpError> {
+    match state.ctx.kernel.current().await? {
+        Some(installed) => Ok(KernelDto {
+            outcome: "installed".to_owned(),
+            version: installed.version.as_str().to_owned(),
+            binary_path: Some(installed.binary_path),
+            checksum: Some(installed.checksum.as_str().to_owned()),
+            reason: None,
+        }),
+        None => Ok(KernelDto {
+            outcome: "absent".to_owned(),
+            version: String::new(),
+            binary_path: None,
+            checksum: None,
+            reason: Some("no kernel binary is installed".to_owned()),
+        }),
+    }
+}
+
+/// The optional update body.
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateKernelBody {
+    /// The version to install.
+    pub version: String,
+}
+
+/// The installed kernel.
+#[derive(Debug, Clone, Serialize)]
+pub struct KernelDto {
+    /// A stable outcome label.
+    pub outcome: String,
+    /// The version, empty when nothing is installed.
+    pub version: String,
+    /// Where the binary lives.
+    pub binary_path: Option<String>,
+    /// The checksum recorded for it.
+    pub checksum: Option<String>,
+    /// A reason, when the outcome needs one.
+    pub reason: Option<String>,
+}
+
 /// Renders a start outcome.
 fn describe_start(outcome: &proxy_application::commands::lifecycle::StartOutcome) -> LifecycleDto {
     use proxy_application::commands::lifecycle::StartOutcome;

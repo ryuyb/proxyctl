@@ -203,7 +203,24 @@ fn read_caller(stream: &UnixStream, state: &AppState) -> Result<super::state::Ca
 /// A rejection happens before any request is parsed, so it cannot be an
 /// `HttpError` rendered by the router; it is written directly. The body carries a
 /// reason and no credential material.
+///
+/// # Why the request is drained before closing
+///
+/// A client sends its request without waiting for permission — HTTP has no
+/// handshake — so by the time the refusal is written, the request bytes are
+/// already in this socket's receive buffer unread. Closing with unread data makes
+/// Linux send an RST instead of a FIN, and an RST **discards** the refused
+/// response that was just written: the client sees `ECONNRESET` rather than a
+/// `401`, and cannot tell a permission problem from a broken server. macOS
+/// tolerates it, which is exactly how this survived until the Linux run.
+///
+/// So the request is read to its end (bounded, so an endless body cannot hold the
+/// connection open) before the socket is shut down. The refusal still happens
+/// *first* in the protocol sense: no request is parsed, no route is dispatched,
+/// and nothing the client sent is acted on.
 async fn reject(mut stream: UnixStream, reason: &str) {
+    use tokio::io::AsyncReadExt;
+
     let body = format!(
         "{{\"code\":\"UNAUTHENTICATED\",\"message\":\"{}\"}}",
         // The reason is a fixed string from `AuthError`, so it needs no further
@@ -217,6 +234,24 @@ async fn reject(mut stream: UnixStream, reason: &str) {
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.flush().await;
+
+    // Drain whatever the client already sent. The bound is small: a refusal is
+    // not a place to read a large upload, and the goal is only to avoid leaving
+    // unread bytes behind.
+    let mut scratch = [0u8; 1024];
+    for _ in 0..8 {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            stream.read(&mut scratch),
+        )
+        .await
+        {
+            // Data, or EOF: either way there is nothing more to wait for.
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(_)) => {}
+        }
+    }
+
     let _ = stream.shutdown().await;
 }
 

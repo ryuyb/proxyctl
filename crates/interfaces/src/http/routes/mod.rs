@@ -36,6 +36,10 @@ pub fn router() -> Router<AppState> {
             post(mihomo::restart),
         )
         .route(&format!("{API_PREFIX}/mihomo/reload"), post(mihomo::reload))
+        .route(
+            &format!("{API_PREFIX}/mihomo/kernel"),
+            get(mihomo::get_kernel).post(mihomo::update),
+        )
         .route(&format!("{API_PREFIX}/configs"), get(configs::list))
         .route(
             &format!("{API_PREFIX}/configs/validate"),
