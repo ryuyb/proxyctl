@@ -58,6 +58,14 @@ pub enum ConverterConfig {
     External {
         /// Base URL of the service.
         base_url: String,
+        /// Whether a non-loopback base URL is acceptable.
+        ///
+        /// Defaults to `false`, and that default matters: the converter backend
+        /// has no authentication at all, so anything able to reach it can read and
+        /// write this agent's subscription records — including the URLs, which
+        /// carry their own credentials. Enabling this is an explicit statement
+        /// that the network path is trusted.
+        allow_non_loopback: bool,
     },
 }
 

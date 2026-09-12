@@ -47,7 +47,7 @@ use proxy_application::ports::audit_sink::AuditSink;
 use proxy_application::ports::capability_probe::CapabilityProbe;
 use proxy_application::ports::config_repository::ConfigRepository;
 use proxy_application::ports::config_validator::ConfigValidator;
-use proxy_application::ports::error::PortError;
+use proxy_application::ports::error::{ConverterError, PortError};
 use proxy_application::ports::event_publisher::EventPublisher;
 use proxy_application::ports::instance_repository::InstanceRepository;
 use proxy_application::ports::job_registry::JobRegistry;
@@ -82,6 +82,7 @@ use proxy_infrastructure::storage::instances::SqliteInstanceRepository;
 use proxy_infrastructure::storage::jobs::SqliteJobRegistry;
 use proxy_infrastructure::storage::secrets::SqliteSecretStore;
 use proxy_infrastructure::storage::subscriptions::SqliteSubscriptionRepository;
+use proxy_infrastructure::subscription::SubStoreConverter;
 use proxy_infrastructure::system::{LinuxCapabilityProbe, SystemdServiceManager};
 use proxy_infrastructure::validation::KernelConfigValidator;
 
@@ -300,18 +301,21 @@ impl MihomoConnectionOps for UnavailableConnections {
     }
 }
 
-/// The subscription converter, which has no adapter yet.
+/// The converter when none is configured.
+///
+/// A missing converter is a supported deployment rather than an error state:
+/// everything except a subscription update works, and an update fails with an
+/// explanation. This is the fallback ADR-002 D1 keeps for exactly that case.
 #[derive(Debug, Clone, Copy)]
 struct UnavailableConverter;
 
 #[async_trait]
 impl SubscriptionConverter for UnavailableConverter {
     async fn convert(&self, _request: &ConvertRequest) -> Result<ConvertedProxies, PortError> {
-        Err(unimplemented(
-            "SubscriptionConverter",
-            "no converter is configured; subscription conversion is a separate decision and its \
-             adapter is not built yet",
-        ))
+        Err(PortError::Converter(ConverterError::Unreachable(
+            "no converter is configured; subscription conversion is unavailable until one is"
+                .to_owned(),
+        )))
     }
 
     async fn capabilities(
@@ -324,10 +328,44 @@ impl SubscriptionConverter for UnavailableConverter {
     }
 
     async fn health(&self) -> Result<proxy_application::ports::types::ConverterHealth, PortError> {
-        Err(unimplemented(
-            "SubscriptionConverter",
-            "no converter is configured, so there is nothing to check",
-        ))
+        Ok(
+            proxy_application::ports::types::ConverterHealth::Misconfigured {
+                reason: "no converter is configured".to_owned(),
+            },
+        )
+    }
+}
+
+/// The converter when the configured URL was refused.
+///
+/// Reported on use rather than aborting composition: the agent must start so it
+/// can *say* the converter is misconfigured, and everything except conversion
+/// still works.
+#[derive(Debug, Clone)]
+struct UnusableConverter {
+    reason: String,
+}
+
+#[async_trait]
+impl SubscriptionConverter for UnusableConverter {
+    async fn convert(&self, _request: &ConvertRequest) -> Result<ConvertedProxies, PortError> {
+        Err(PortError::Converter(ConverterError::Unreachable(
+            self.reason.clone(),
+        )))
+    }
+
+    async fn capabilities(
+        &self,
+    ) -> Result<proxy_application::ports::types::ConverterCapabilities, PortError> {
+        Err(unimplemented("SubscriptionConverter", &self.reason))
+    }
+
+    async fn health(&self) -> Result<proxy_application::ports::types::ConverterHealth, PortError> {
+        Ok(
+            proxy_application::ports::types::ConverterHealth::Misconfigured {
+                reason: self.reason.clone(),
+            },
+        )
     }
 }
 
@@ -396,12 +434,24 @@ impl AdapterFactory for RealFactory {
         Arc::new(SqliteSubscriptionRepository::new(self.pool.clone()))
     }
 
-    fn converter(&self, _config: &ConverterConfig) -> Arc<dyn SubscriptionConverter> {
-        // No converter is a supported deployment: everything except a
-        // subscription update works, and an update fails with an explanation.
-        // The external variant is not built yet either, so both return the same
-        // adapter rather than one pretending to be configured.
-        Arc::new(UnavailableConverter)
+    fn converter(&self, config: &ConverterConfig) -> Arc<dyn SubscriptionConverter> {
+        match config {
+            // No converter is a supported deployment: everything except a
+            // subscription update works, and an update fails with an explanation.
+            ConverterConfig::None => Arc::new(UnavailableConverter),
+            ConverterConfig::External {
+                base_url,
+                allow_non_loopback,
+            } => match SubStoreConverter::new(base_url, *allow_non_loopback) {
+                Ok(converter) => Arc::new(converter),
+                // A refused URL is reported on use rather than aborting
+                // composition: the agent must start so it can *say* the converter
+                // is misconfigured, and everything except conversion still works.
+                Err(e) => Arc::new(UnusableConverter {
+                    reason: e.to_string(),
+                }),
+            },
+        }
     }
 
     fn capabilities(&self, _allow_write_probes: bool) -> Arc<dyn CapabilityProbe> {
@@ -551,6 +601,11 @@ mod tests {
         let err = connections.connections().await.expect_err("no adapter");
         assert!(err.to_string().contains("MihomoConnectionOps"), "{err}");
 
+        // The converter is a different case from the two above: a missing
+        // converter is a *supported deployment* rather than an unimplemented
+        // port, so it reports that none is configured. The message must be about
+        // configuration, not about missing code, or an operator would go looking
+        // for the wrong problem.
         let converter = factory.converter(&ConverterConfig::None);
         let request = ConvertRequest {
             source: proxy_domain::subscription::SubscriptionSource::from_url(
@@ -563,8 +618,19 @@ mod tests {
             merge_sources: false,
             cache: proxy_application::ports::types::CachePolicy::PreferCache,
         };
-        let err = converter.convert(&request).await.expect_err("no adapter");
-        assert!(err.to_string().contains("SubscriptionConverter"), "{err}");
+        let err = converter.convert(&request).await.expect_err("no converter");
+        assert!(
+            err.to_string().contains("no converter is configured"),
+            "a missing converter must be reported as a configuration state: {err}"
+        );
+        // And its health reflects the same state rather than claiming to work.
+        assert!(matches!(
+            converter
+                .health()
+                .await
+                .expect("health is a state, not an error"),
+            proxy_application::ports::types::ConverterHealth::Misconfigured { .. }
+        ));
     }
 
     /// Storage adapters must share one pool, so a write through one is visible

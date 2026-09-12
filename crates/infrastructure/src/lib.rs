@@ -29,5 +29,6 @@ pub mod kernel;
 pub mod mihomo;
 pub mod process;
 pub mod storage;
+pub mod subscription;
 pub mod system;
 pub mod validation;
