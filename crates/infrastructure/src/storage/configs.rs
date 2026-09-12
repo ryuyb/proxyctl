@@ -54,7 +54,7 @@ pub struct FileConfigRepository {
 }
 
 impl FileConfigRepository {
-    /// Creates a repository.
+    /// Creates a repository, creating the directory if it is absent.
     ///
     /// # Errors
     ///
@@ -67,6 +67,32 @@ impl FileConfigRepository {
             .map_err(|e| storage_err(format!("cannot create {}: {e}", configs_dir.display())))?;
         set_mode(&configs_dir, DIRECTORY_MODE).await?;
         Ok(Self { pool, configs_dir })
+    }
+
+    /// Creates a repository over a directory that already exists.
+    ///
+    /// Exists because [`AdapterFactory::configs`] is synchronous while creating
+    /// a directory is not: the composition root prepares the directories (it is
+    /// async) and this constructor then does no I/O. The alternative — blocking
+    /// inside a sync factory method — would stall a runtime thread on a
+    /// filesystem call.
+    ///
+    /// [`AdapterFactory::configs`]: proxy_bootstrap::AdapterFactory::configs
+    #[must_use]
+    pub fn over_existing_dir(pool: SqlitePool, configs_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            pool,
+            configs_dir: configs_dir.into(),
+        }
+    }
+
+    /// The permissions a configs directory is expected to carry.
+    ///
+    /// Exposed so the composition root can create the directory with exactly the
+    /// mode this adapter would have applied.
+    #[must_use]
+    pub const fn directory_mode() -> u32 {
+        DIRECTORY_MODE
     }
 
     /// The directory holding configuration bodies.

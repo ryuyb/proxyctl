@@ -18,6 +18,10 @@ path = "src/lib.rs"
 [dependencies]
 proxy-domain = { path = "../domain" }
 proxy-application = { path = "../application" }
+# The concrete adapters. This is the only crate permitted to depend on both the
+# port traits and their implementations, which is what makes the dependency
+# direction legitimate here and nowhere else.
+proxy-infrastructure = { path = "../infrastructure" }
 thiserror.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync"] }
@@ -32,7 +36,10 @@ test-doubles = ["proxy-application/test-doubles"]
 # exists. Only the minimal set is requested; the fault-injection harness is for
 # the application layer's own tests.
 proxy-application = { path = "../application", features = ["test-doubles"] }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tempfile.workspace = true
+# The lifecycle end-to-end test spawns processes and binds ports, so it needs the
+# multi-threaded runtime and networking, not just the single-threaded timer set.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
 
 [[test]]
 name = "smoke"

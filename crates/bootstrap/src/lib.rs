@@ -29,7 +29,11 @@
 pub mod adapter_factory;
 pub mod composition;
 pub mod config;
+pub mod real_factory;
 
 pub use adapter_factory::AdapterFactory;
 pub use composition::{Bootstrap, BootstrapError, SupervisionModel, supervision_model};
-pub use config::{ControllerEndpoint, ConverterConfig, DataPaths, RuntimeConfig};
+pub use config::{
+    ControllerEndpoint, ConverterConfig, DEFAULT_KERNEL_BINARY, DataPaths, RuntimeConfig,
+};
+pub use real_factory::RealFactory;

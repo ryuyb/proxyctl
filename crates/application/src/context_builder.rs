@@ -65,6 +65,7 @@ pub struct AppContextBuilder {
     kernel: Option<Arc<dyn KernelInstaller>>,
     events: Option<Arc<dyn EventPublisher>>,
     instances: Option<Arc<dyn InstanceRepository>>,
+    start_options: Option<crate::ports::process_manager::StartOptions>,
 }
 
 impl AppContextBuilder {
@@ -193,6 +194,22 @@ impl AppContextBuilder {
         self
     }
 
+    /// Sets the options used to spawn the kernel.
+    ///
+    /// Required for the first start: a context without them can observe and stop
+    /// a kernel but cannot spawn one, and [`StartMihomo`] would report that
+    /// rather than guess a binary path.
+    ///
+    /// The options are *initial* ones. Once a start succeeds they are replaced by
+    /// the options actually used, so a restart reuses what worked.
+    ///
+    /// [`StartMihomo`]: crate::commands::lifecycle::StartMihomo
+    #[must_use]
+    pub fn start_options(mut self, options: crate::ports::process_manager::StartOptions) -> Self {
+        self.start_options = Some(options);
+        self
+    }
+
     /// Produces the context, or reports the first missing dependency.
     ///
     /// # Errors
@@ -223,7 +240,17 @@ impl AppContextBuilder {
             // Not injectable: these carry no behaviour to substitute.
             locks: Arc::new(InstanceLocks::new()),
             guards: Arc::new(SubscriptionGuards::new()),
-            process_state: Arc::new(Mutex::new(ProcessState::default())),
+            process_state: Arc::new(Mutex::new({
+                // The spawn options are seeded here so a first start has the
+                // paths it needs. Without this, `start_options()` is always
+                // `None` and no kernel can ever be spawned — the state is empty
+                // until a start succeeds, and a start needs the options.
+                let mut state = ProcessState::default();
+                if let Some(options) = self.start_options {
+                    state.set_options(options);
+                }
+                state
+            })),
         })
     }
 }

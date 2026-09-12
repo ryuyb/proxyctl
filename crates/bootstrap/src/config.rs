@@ -82,7 +82,54 @@ impl DataPaths {
             run_dir: "/run/proxy-agent".to_owned(),
         }
     }
+
+    /// The metadata database, which lives beside the other mutable state.
+    ///
+    /// Derived rather than configured, so the database cannot drift away from the
+    /// directory that packaging creates and the backup procedure names.
+    #[must_use]
+    pub fn database_path(&self) -> String {
+        format!("{}/database.sqlite", self.state_dir.trim_end_matches('/'))
+    }
+
+    /// The kernel's own data directory, where it keeps geo data and its cache.
+    ///
+    /// Separate from `state_dir` because the kernel writes here directly on a
+    /// schedule and the agent must not treat its contents as its own.
+    #[must_use]
+    pub fn kernel_data_dir(&self) -> String {
+        format!(
+            "{}/mihomo",
+            self.state_dir
+                .trim_end_matches('/')
+                .rsplit_once('/')
+                .map(|(parent, _)| parent)
+                .unwrap_or("/var/lib/proxy-agent")
+        )
+    }
+
+    /// Where temporary artifacts and validation sandboxes live.
+    ///
+    /// Under the same parent as the configs directory so a rename into place
+    /// cannot cross a filesystem, which is what keeps an install atomic.
+    #[must_use]
+    pub fn scratch_dir(&self) -> String {
+        format!(
+            "{}/scratch",
+            self.state_dir
+                .trim_end_matches('/')
+                .rsplit_once('/')
+                .map(|(parent, _)| parent)
+                .unwrap_or("/var/lib/proxy-agent")
+        )
+    }
 }
+
+/// Where the kernel binary is installed.
+///
+/// Under `/usr/lib` because the agent replaces it wholesale, and a reader that
+/// may be replaced is not something to keep in `/usr/bin`.
+pub const DEFAULT_KERNEL_BINARY: &str = "/usr/lib/proxy-agent/mihomo";
 
 /// Inputs to composition.
 #[derive(Debug, Clone)]
@@ -100,6 +147,30 @@ pub struct RuntimeConfig {
     /// Off by default: probes that create devices or touch firewall state can
     /// leave residue if interrupted, so they need an explicit opt-in.
     pub allow_write_probes: bool,
+    /// Absolute path to the kernel binary.
+    ///
+    /// Needed at construction by the validator and installer, and at call time by
+    /// the process manager, which spawns it.
+    pub kernel_binary: String,
+    /// The kernel's data directory (`-d`).
+    ///
+    /// Used by the process manager to launch the kernel and by the validator to
+    /// find geo data the kernel has already downloaded, so a validation does not
+    /// fetch it again.
+    ///
+    /// `None` means "derive it from [`DataPaths`]", which is the normal case and
+    /// keeps the two from drifting.
+    pub kernel_data_dir: Option<String>,
+    /// Where temporary artifacts and validation sandboxes are created.
+    ///
+    /// `None` means "derive it from [`DataPaths`]".
+    pub scratch_dir: Option<String>,
+    /// The kernel controller's shared secret.
+    ///
+    /// Only meaningful for a loopback controller. Over a unix socket the kernel
+    /// does not authenticate requests at all, so this is not sent and the
+    /// socket's file permissions are the whole boundary.
+    pub mihomo_secret: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -112,7 +183,52 @@ impl RuntimeConfig {
             converter: ConverterConfig::None,
             paths: DataPaths::standard(),
             allow_write_probes: false,
+            kernel_binary: DEFAULT_KERNEL_BINARY.to_owned(),
+            kernel_data_dir: None,
+            scratch_dir: None,
+            mihomo_secret: None,
         }
+    }
+
+    /// A configuration rooted at `root`, for tests and development.
+    ///
+    /// Everything lands under one directory so a test can point at a temporary
+    /// tree and touch nothing else.
+    #[must_use]
+    pub fn rooted_at(instance: MihomoInstanceId, root: impl Into<String>) -> Self {
+        let root = root.into();
+        let root = root.trim_end_matches('/').to_owned();
+        Self {
+            instance,
+            controller: ControllerEndpoint::UnixSocket(format!("{root}/run/mihomo.sock")),
+            converter: ConverterConfig::None,
+            paths: DataPaths {
+                configs_dir: format!("{root}/lib/configs"),
+                state_dir: format!("{root}/lib/state"),
+                run_dir: format!("{root}/run"),
+            },
+            allow_write_probes: false,
+            kernel_binary: format!("{root}/bin/mihomo"),
+            kernel_data_dir: Some(format!("{root}/lib/mihomo")),
+            scratch_dir: Some(format!("{root}/lib/scratch")),
+            mihomo_secret: None,
+        }
+    }
+
+    /// The kernel's data directory, derived when not set explicitly.
+    #[must_use]
+    pub fn kernel_data_dir(&self) -> String {
+        self.kernel_data_dir
+            .clone()
+            .unwrap_or_else(|| self.paths.kernel_data_dir())
+    }
+
+    /// The scratch directory, derived when not set explicitly.
+    #[must_use]
+    pub fn scratch_dir(&self) -> String {
+        self.scratch_dir
+            .clone()
+            .unwrap_or_else(|| self.paths.scratch_dir())
     }
 }
 
