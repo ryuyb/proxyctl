@@ -207,6 +207,62 @@ impl MihomoInstance {
     pub fn clear_failure(&mut self) {
         self.last_failure = None;
     }
+
+    /// Restores an instance from persisted state.
+    ///
+    /// # Why this exists
+    ///
+    /// Every field is private and there is no setter that establishes a status
+    /// wholesale, so a storage adapter cannot reassemble an aggregate. Without
+    /// this, a restarted agent would load no state, see a fresh instance, and
+    /// decide to spawn — the duplicate-spawn failure
+    /// [`InstanceRepository`] exists to prevent.
+    ///
+    /// [`InstanceRepository`]: https://docs.rs/proxy-application
+    ///
+    /// # Invariants are re-checked, not trusted
+    ///
+    /// A persisted record is external input: it may have been hand-edited or
+    /// written by an older version. The name is validated exactly as
+    /// [`new`](Self::new) validates it, so a corrupt row is rejected rather
+    /// than loaded into a state the rest of the domain assumes is impossible.
+    ///
+    /// # Errors
+    /// Returns [`DomainError::Invariant`] when `name` is blank.
+    pub fn reconstitute(
+        id: MihomoInstanceId,
+        name: impl Into<String>,
+        status: MihomoStatus,
+        active_config: Option<ConfigVersionId>,
+        running_build: Option<MihomoBuild>,
+        last_failure: Option<FailureRecord>,
+    ) -> Result<Self, DomainError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(DomainError::invariant(
+                "instance name must not be empty when restoring",
+            ));
+        }
+
+        // A build is only meaningful while the process is live. Rather than
+        // reject a stale record, drop the contradiction: the status is the
+        // authority, and reporting a "running build" for a stopped instance
+        // would surface stale data as current.
+        let running_build = if status.is_live() {
+            running_build
+        } else {
+            None
+        };
+
+        Ok(Self {
+            id,
+            name,
+            status,
+            active_config,
+            running_build,
+            last_failure,
+        })
+    }
 }
 
 /// Placeholder doc anchor kept for cross-crate references.
@@ -216,6 +272,7 @@ pub const SPI: () = ();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mihomo::KernelFlavor;
 
     const NOW: Timestamp = Timestamp::from_unix_seconds(1_700_000_000);
 
@@ -232,6 +289,85 @@ mod tests {
     fn rejects_blank_name() {
         let id = MihomoInstanceId::parse("default").expect("valid");
         assert!(MihomoInstance::new(id, "   ").is_err());
+    }
+
+    /// Round trip: what a storage adapter reads back must equal what it saved.
+    #[test]
+    fn reconstitute_restores_every_field() {
+        let id = MihomoInstanceId::parse("default").expect("valid");
+        let build = MihomoBuild::new("v1.19.30", KernelFlavor::Meta, "raw").expect("valid build");
+        let failure = FailureRecord::new("bind failed", NOW);
+
+        let restored = MihomoInstance::reconstitute(
+            id.clone(),
+            "default",
+            MihomoStatus::DEGRADED,
+            Some(config_id("cfg-041")),
+            Some(build.clone()),
+            Some(failure.clone()),
+        )
+        .expect("valid restore");
+
+        assert_eq!(restored.id(), &id);
+        assert_eq!(restored.name(), "default");
+        assert_eq!(restored.status(), MihomoStatus::DEGRADED);
+        assert_eq!(restored.active_config(), Some(&config_id("cfg-041")));
+        assert_eq!(restored.running_build(), Some(&build));
+        assert_eq!(restored.last_failure(), Some(&failure));
+    }
+
+    /// Restoring must not skip validation: a corrupt record is rejected.
+    #[test]
+    fn reconstitute_rejects_a_blank_name() {
+        let id = MihomoInstanceId::parse("default").expect("valid");
+        let err = MihomoInstance::reconstitute(id, "", MihomoStatus::RUNNING, None, None, None)
+            .expect_err("a blank name is invalid even when restored");
+        assert!(matches!(err, DomainError::Invariant { .. }));
+    }
+
+    /// The duplicate-spawn guard depends on the status surviving a reload: a
+    /// running instance that reloaded as stopped would be spawned again.
+    #[test]
+    fn a_restored_live_instance_does_not_decide_to_spawn() {
+        let id = MihomoInstanceId::parse("default").expect("valid");
+        let running = MihomoInstance::reconstitute(
+            id.clone(),
+            "default",
+            MihomoStatus::RUNNING,
+            None,
+            None,
+            None,
+        )
+        .expect("valid");
+        assert_eq!(running.begin_start(), StartDecision::AlreadyRunning);
+
+        let stopped =
+            MihomoInstance::reconstitute(id, "default", MihomoStatus::STOPPED, None, None, None)
+                .expect("valid");
+        assert_eq!(stopped.begin_start(), StartDecision::Spawn);
+    }
+
+    /// A stale build on a stopped instance is dropped rather than reported as
+    /// current; the status is the authority.
+    #[test]
+    fn reconstitute_drops_a_build_for_a_non_live_status() {
+        let id = MihomoInstanceId::parse("default").expect("valid");
+        let build = MihomoBuild::new("v1.19.30", KernelFlavor::Meta, "raw").expect("valid");
+
+        let stopped = MihomoInstance::reconstitute(
+            id,
+            "default",
+            MihomoStatus::STOPPED,
+            None,
+            Some(build),
+            None,
+        )
+        .expect("valid");
+
+        assert!(
+            stopped.running_build().is_none(),
+            "a stopped instance must not report a running build"
+        );
     }
 
     #[test]

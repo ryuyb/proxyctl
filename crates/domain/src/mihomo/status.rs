@@ -19,6 +19,8 @@
 //!
 //! [`Degraded`]: MihomoStatus::DEGRADED
 
+use crate::shared::error::DomainError;
+
 /// A rejected lifecycle transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("invalid state transition: {from} -> {to}")]
@@ -82,6 +84,40 @@ impl MihomoStatus {
             Inner::Stopping => "Stopping",
             Inner::Failed => "Failed",
         }
+    }
+
+    /// Rebuilds a state from its [`as_str`](Self::as_str) label.
+    ///
+    /// # Why this exists
+    ///
+    /// The inner representation is private, so a persisted status cannot be
+    /// turned back into a value from outside this module. Storage adapters need
+    /// a way back in, and this is it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unrecognized label rather than falling back to
+    /// [`STOPPED`](Self::STOPPED). The fallback would be actively dangerous: a
+    /// running kernel whose persisted status failed to parse would present as
+    /// stopped, and lifecycle commands would then spawn a second one — exactly
+    /// the duplicate the state machine and its repository exist to prevent.
+    pub fn from_label(label: &str) -> Result<Self, DomainError> {
+        // Case-insensitive so a hand-edited or externally written record is
+        // readable, but still exact about which state it names.
+        let status = match label.trim().to_ascii_lowercase().as_str() {
+            "stopped" => Self::STOPPED,
+            "starting" => Self::STARTING,
+            "running" => Self::RUNNING,
+            "degraded" => Self::DEGRADED,
+            "stopping" => Self::STOPPING,
+            "failed" => Self::FAILED,
+            _ => {
+                return Err(DomainError::invariant(format!(
+                    "unknown mihomo status label: {label}"
+                )));
+            }
+        };
+        Ok(status)
     }
 
     /// Whether the process is expected to be alive in this state.
@@ -176,6 +212,61 @@ impl std::fmt::Display for MihomoStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every label survives a round trip, which is what persistence relies on.
+    #[test]
+    fn labels_round_trip_through_from_label() {
+        for status in MihomoStatus::ALL {
+            let parsed = MihomoStatus::from_label(status.as_str())
+                .unwrap_or_else(|e| panic!("{} must parse: {e}", status.as_str()));
+            assert_eq!(parsed, status, "{} must round trip", status.as_str());
+        }
+    }
+
+    /// The dangerous case: an unreadable status must not silently become
+    /// `Stopped`, because a stopped-looking instance gets started again.
+    #[test]
+    fn an_unknown_label_is_an_error_not_a_fallback_to_stopped() {
+        let err = MihomoStatus::from_label("runing").expect_err("typo must not parse");
+        assert!(
+            err.to_string().contains("runing"),
+            "the error should name the offending label: {err}"
+        );
+
+        assert!(MihomoStatus::from_label("").is_err());
+        assert!(MihomoStatus::from_label("bogus").is_err());
+    }
+
+    /// Parsing is lenient about case and padding, but not about identity.
+    #[test]
+    fn parsing_tolerates_case_and_whitespace() {
+        assert_eq!(
+            MihomoStatus::from_label(" RUNNING ").expect("valid"),
+            MihomoStatus::RUNNING
+        );
+        assert_eq!(
+            MihomoStatus::from_label("degraded").expect("valid"),
+            MihomoStatus::DEGRADED
+        );
+    }
+
+    /// The fallback being rejected is not enough: the previous state must not be
+    /// silently replaced by a default either.
+    #[test]
+    fn a_parsed_status_is_never_stopped_unless_it_says_so() {
+        for status in MihomoStatus::ALL {
+            if status == MihomoStatus::STOPPED {
+                continue;
+            }
+            let parsed = MihomoStatus::from_label(status.as_str()).expect("valid");
+            assert_ne!(
+                parsed,
+                MihomoStatus::STOPPED,
+                "{} must not decay to Stopped",
+                status.as_str()
+            );
+        }
+    }
 
     #[test]
     fn display_is_stable() {
