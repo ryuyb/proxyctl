@@ -39,6 +39,69 @@ impl UpdateFailure {
             Self::PreservedActiveConfig(_) => "preserved-active-config",
         }
     }
+
+    /// The detail string, for the variants that carry one.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::PreservedActiveConfig(_) => None,
+            Self::Unreachable(d)
+            | Self::ConversionFailed(d)
+            | Self::InvalidOutput(d)
+            | Self::ValidationFailed(d) => Some(d.as_str()),
+        }
+    }
+
+    /// The preserved version, for the variant that carries one.
+    #[must_use]
+    pub const fn preserved(&self) -> Option<&ConfigVersionId> {
+        match self {
+            Self::PreservedActiveConfig(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Rebuilds a failure from stored columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::Invariant`] for an unknown kind, or when a
+    /// variant's required payload is missing. The most important case is
+    /// [`PreservedActiveConfig`](Self::PreservedActiveConfig): its whole meaning
+    /// is *which* version survived, so a row that lost the identifier cannot be
+    /// reconstructed into a message claiming the previous config is intact.
+    pub fn from_parts(
+        kind: &str,
+        detail: Option<&str>,
+        preserved: Option<&str>,
+    ) -> Result<Self, DomainError> {
+        let with_detail = |what: &str| -> Result<String, DomainError> {
+            detail
+                .filter(|d| !d.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    DomainError::invariant(format!("a {what} failure requires a detail"))
+                })
+        };
+
+        match kind.trim() {
+            "unreachable" => Ok(Self::Unreachable(with_detail("unreachable")?)),
+            "conversion-failed" => Ok(Self::ConversionFailed(with_detail("conversion-failed")?)),
+            "invalid-output" => Ok(Self::InvalidOutput(with_detail("invalid-output")?)),
+            "validation-failed" => Ok(Self::ValidationFailed(with_detail("validation-failed")?)),
+            "preserved-active-config" => {
+                let raw = preserved.filter(|s| !s.is_empty()).ok_or_else(|| {
+                    DomainError::invariant(
+                        "a preserved-active-config failure requires the preserved version",
+                    )
+                })?;
+                Ok(Self::PreservedActiveConfig(ConfigVersionId::parse(raw)?))
+            }
+            other => Err(DomainError::invariant(format!(
+                "unknown update failure kind: {other}"
+            ))),
+        }
+    }
 }
 
 /// The outcome of an update attempt.
@@ -211,6 +274,71 @@ impl Subscription {
     }
 }
 
+/// The persisted state of a subscription, for restoration.
+///
+/// A struct rather than a long parameter list because several fields are
+/// independently optional, and positional construction of eight arguments —
+/// two of them `Option` — invites transposing them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionState {
+    /// Identifier.
+    pub id: SubscriptionId,
+    /// Display name.
+    pub name: String,
+    /// Where nodes come from.
+    pub source: SubscriptionSource,
+    /// Which converter produces them.
+    pub converter: ConverterId,
+    /// The output format.
+    pub target: TargetFormat,
+    /// Whether scheduled updates are enabled.
+    pub enabled: bool,
+    /// The update schedule, if any.
+    pub schedule: Option<Schedule>,
+    /// The most recent update attempt, if any.
+    pub last_update: Option<UpdateRecord>,
+}
+
+impl Subscription {
+    /// Restores a subscription from persisted state.
+    ///
+    /// # Why this exists
+    ///
+    /// [`new`](Self::new) forces `enabled: true` and `last_update: None`, and the
+    /// mutators that change those take `&mut self`. So a storage adapter cannot
+    /// rebuild an existing subscription — and the consequence is not cosmetic:
+    /// losing `last_update` makes
+    /// [`is_due`](Self::is_due) report *every* scheduled subscription as due,
+    /// which turns one restart into an immediate update storm for all of them.
+    /// Losing `enabled: false` silently re-enables a subscription an operator
+    /// deliberately turned off.
+    ///
+    /// # Invariants are re-checked
+    ///
+    /// The name is validated exactly as [`new`](Self::new) validates it, because
+    /// a persisted record is external input and may have been hand-edited.
+    ///
+    /// # Errors
+    /// Returns [`DomainError::Invariant`] when the name is blank.
+    pub fn reconstitute(state: SubscriptionState) -> Result<Self, DomainError> {
+        if state.name.trim().is_empty() {
+            return Err(DomainError::invariant(
+                "subscription name must not be empty when restoring",
+            ));
+        }
+        Ok(Self {
+            id: state.id,
+            name: state.name,
+            source: state.source,
+            converter: state.converter,
+            target: state.target,
+            enabled: state.enabled,
+            schedule: state.schedule,
+            last_update: state.last_update,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +360,23 @@ mod tests {
 
     fn hourly() -> Schedule {
         Schedule::new(Interval::from_seconds(3600).expect("valid"))
+    }
+
+    fn state(
+        enabled: bool,
+        schedule: Option<Schedule>,
+        last: Option<UpdateRecord>,
+    ) -> SubscriptionState {
+        SubscriptionState {
+            id: SubscriptionId::parse("sub-1").expect("valid"),
+            name: "primary".to_owned(),
+            source: SubscriptionSource::from_url("https://example.com/sub", None).expect("valid"),
+            converter: ConverterId::parse("sub-store").expect("valid"),
+            target: TargetFormat::Mihomo,
+            enabled,
+            schedule,
+            last_update: last,
+        }
     }
 
     #[test]
@@ -360,5 +505,116 @@ mod tests {
         assert_eq!(sub.converter().as_str(), "sub-store");
         assert_eq!(sub.source().as_str(), "url");
         assert_eq!(sub.id().as_str(), "sub-1");
+    }
+    /// The regression this API exists to prevent: without `last_update`, every
+    /// scheduled subscription looks due and one restart triggers an update storm.
+    #[test]
+    fn reconstitute_preserves_last_update_so_a_restart_is_not_an_update_storm() {
+        let last = UpdateRecord::new(
+            Timestamp::from_unix_seconds(NOW.as_unix_seconds() - 60),
+            UpdateOutcome::Succeeded(ConfigVersionId::parse("v001").expect("valid")),
+        );
+
+        let restored = Subscription::reconstitute(state(true, Some(hourly()), Some(last.clone())))
+            .expect("valid restore");
+
+        assert_eq!(restored.last_update(), Some(&last));
+        assert!(
+            !restored.is_due(NOW),
+            "a subscription updated a minute ago must not be due again"
+        );
+
+        // And the counterfactual: dropping the record makes it look due.
+        let without =
+            Subscription::reconstitute(state(true, Some(hourly()), None)).expect("valid restore");
+        assert!(
+            without.is_due(NOW),
+            "this is why losing last_update would be a defect"
+        );
+    }
+
+    /// A disabled subscription must stay disabled across a restart, or an
+    /// operator's deliberate choice is silently undone.
+    #[test]
+    fn reconstitute_preserves_the_disabled_flag() {
+        let restored =
+            Subscription::reconstitute(state(false, Some(hourly()), None)).expect("valid restore");
+
+        assert!(!restored.is_enabled());
+        assert!(
+            !restored.is_due(NOW),
+            "a disabled subscription is never due"
+        );
+    }
+
+    #[test]
+    fn reconstitute_restores_every_field() {
+        let restored = Subscription::reconstitute(SubscriptionState {
+            id: SubscriptionId::parse("sub-9").expect("valid"),
+            name: "secondary".to_owned(),
+            source: SubscriptionSource::from_url(
+                "https://example.com/s2",
+                Some("agent/1".to_owned()),
+            )
+            .expect("valid"),
+            converter: ConverterId::parse("native").expect("valid"),
+            target: TargetFormat::Mihomo,
+            enabled: true,
+            schedule: None,
+            last_update: None,
+        })
+        .expect("valid restore");
+
+        assert_eq!(restored.id().as_str(), "sub-9");
+        assert_eq!(restored.name(), "secondary");
+        assert_eq!(restored.converter().as_str(), "native");
+        assert_eq!(restored.target(), TargetFormat::Mihomo);
+        assert!(restored.schedule().is_none());
+        assert!(restored.last_update().is_none());
+        assert_eq!(restored.source().user_agent(), Some("agent/1"));
+    }
+
+    #[test]
+    fn reconstitute_rejects_a_blank_name() {
+        let mut blank = state(true, None, None);
+        blank.name = "  ".to_owned();
+        let err = Subscription::reconstitute(blank)
+            .expect_err("a blank name is invalid even when restored");
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn every_update_failure_round_trips() {
+        let failures = [
+            UpdateFailure::Unreachable("timeout".into()),
+            UpdateFailure::ConversionFailed("converter 500".into()),
+            UpdateFailure::InvalidOutput("empty body".into()),
+            UpdateFailure::ValidationFailed("bad yaml".into()),
+            UpdateFailure::PreservedActiveConfig(ConfigVersionId::parse("v004").expect("valid")),
+        ];
+        for failure in failures {
+            let restored = UpdateFailure::from_parts(
+                failure.kind(),
+                failure.detail(),
+                failure.preserved().map(ConfigVersionId::as_str),
+            )
+            .expect("every variant must restore");
+            assert_eq!(restored, failure, "{} must round trip", failure.kind());
+        }
+    }
+
+    /// The preserved version is the entire point of that variant, so losing it
+    /// must not yield a message claiming the previous config is intact.
+    #[test]
+    fn a_preserved_config_failure_needs_its_version() {
+        let err = UpdateFailure::from_parts("preserved-active-config", None, None)
+            .expect_err("the preserved version is required");
+        assert!(err.to_string().contains("preserved version"), "{err}");
+
+        let err = UpdateFailure::from_parts("unreachable", None, None)
+            .expect_err("an unreachable failure needs a detail");
+        assert!(err.to_string().contains("requires a detail"), "{err}");
+
+        assert!(UpdateFailure::from_parts("exploded", Some("x"), None).is_err());
     }
 }
