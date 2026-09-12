@@ -41,6 +41,7 @@ pub mod error;
 pub mod locks;
 pub mod ports;
 pub mod queries;
+pub mod redaction;
 
 /// In-memory test doubles with fault injection.
 ///

@@ -222,6 +222,78 @@ GET /rules    →  {"rules":   [ {"index":0,"type":"Match","payload":"","proxy":
 必须判 `!= 0`，不能判 `is_some`。`tun` 是子对象，`tun.enable` 只反映**配置意图**，
 不代表内核能力可用（与 3.3 结论一致）。
 
+### 3.3.2 观测面（`/logs` `/traffic` `/memory` `/connections`）线格式实测（2026-09-12，linux arm64）
+
+在 Debian（mihomo v1.19.30 linux arm64）上逐一实测四个观测端点，**证据来自本次运行**。
+这些结论直接决定 `MihomoObserver` 适配器的形态，故单独成节。
+
+**全部四个端点都是 chunked 流，永不自行结束**（`[实测]`）：
+
+| 端点 | 响应头 | 结束行为 |
+|---|---|---|
+| `/traffic` | `200` + `Transfer-Encoding: chunked` | 8s 内不结束，需外部超时 |
+| `/memory` | `200` + `Transfer-Encoding: chunked` | 同上 |
+| `/connections` | `200` + `Transfer-Encoding: chunked` | 同上 |
+| `/logs` | **连接后不立即返回响应头** | 直到第一条日志出现才刷头，随后持续推送 |
+
+两条对解析器有实际影响的结论：
+
+1. **`Transfer-Encoding: chunked`，且现有 `send` 不处理分块编码。**
+   Agent 的 `Transport::send` 现在用 `read_to_end` 再解析裸 body；对 chunked 流它既
+   等不到结尾，也拿不到正确字节。**必须新增一个流式入口**，而不是复用 `send`。
+2. **`/logs` 不立即刷响应头。** 因此「connect 成功 ⇒ 可以读头」这个假设**不成立**：
+   空闲实例上 `/logs` 会长时间停在「已连接但无任何字节」。适配器必须把
+   「连接建立」与「首条数据到达」当作两个独立事件，否则 `proxyctl logs` 在无流量的
+   实例上会表现成「卡住」。
+
+**`/logs` 两种格式的实测对比**（同一次订阅，49 行）：
+
+```text
+默认格式      {"type":"debug","payload":"[DNS] resolve example.com A from ..."}
+structured    {"time":"21:21:55","level":"debug","message":"[DNS] resolve ...","fields":[]}
+```
+
+- 默认格式：级别在 **`type`**，消息在 **`payload`**。
+- `format=structured`：级别在 **`level`**，消息在 **`message`**，另有 **`fields`** 数组。
+- **`structured` 的 `time` 只有 `HH:MM:SS`，没有日期。** 因此时间戳**不能**从该字段
+  直接构造绝对时间；`LogEntry.at` 要么留 `None`，要么由适配器补当天日期（并承担跨午夜
+  的歧义）。这一点推翻了「structured 字段名更稳定所以无代价」的假设——它稳定，但时间信息
+  反而更少。
+
+**级别过滤行为（`[实测]`，此前 R01 仅验证 `level=info`）**：
+
+| `level=` | 实测收到的级别 | 结论 |
+|---|---|---|
+| `debug` | `debug`, `info` | 含本级别及以下 |
+| `info` | `info` | 含本级别，不含 debug |
+| `warning` | （无数据触发） | 无法判断，见下 |
+| `error` | （无数据触发） | 同上 |
+| `silent` | （无数据触发） | 同上 |
+
+`warning`/`error`/`silent` **仍未验证**：本次环境无法稳定产出 warning/error 级日志
+（需要构造 listen 冲突或上游失败才能触发）。已在这一侧保留为未验证项。
+
+**`/traffic` 与 `/memory` 的实测字段**：
+
+```text
+/traffic  {"up":75,"down":870,"upTotal":2790,"downTotal":19155}     ← 逐秒增量 + 累计
+/memory   {"inuse":42098688,"oslimit":0}                            ← inuse 首帧可能为 0
+```
+
+`/memory` 的**第一帧是 `{"inuse":0,"oslimit":0}`**（尚未采样），随后才是真实值。适配器
+若把首帧直接上报，会得到一个假的「内存占用 0」。`/traffic` 同理：空闲时 `up`/`down`
+为 `0` 是真实增量，不是缺失。
+
+**`/connections` 的隐私字段确认存在**（印证 ADR-003 D1 的分拆理由）：
+
+```text
+"metadata":{"sourceIP":"127.0.0.1","uid":0,"process":"","processPath":"",
+            "sourceIPASN":"","destinationIPASN":"",...}
+```
+
+`uid`/`process`/`processPath` 确实随连接记录返回，且外层是 `{"downloadTotal":...,"connections":[...]}`，
+**不是裸数组**。
+
 ### 3.4 `GET /proxies/:name` 实测字段
 
 - **通用字段**：`name, type, alive, udp, uot, xudp, tfo, mptcp, smux, history[], extra, interface, routing-mark, provider-name, dialer-proxy, hidden, icon, testUrl, emptyFallback`
@@ -541,7 +613,7 @@ MihomoStatus / MihomoRuntimeStatus  // 生命周期状态机（Agent 自持）
 4. **`/upgrade` 成功路径**：需 GitHub 可达，未验证下载-替换-restart 全流程。
 5. **`/upgrade/ui` 成功/失败语义**：实测 30s 无响应超时，未取得明确状态码。
 6. **`?force=true` 的真实差异**：实测 `{}` 与 `{}&force=true` 都返回 `204`，**未能观察到行为差异**；`force` 对 listener 重绑的具体影响需专项验证（关联 R02）。
-7. **`/logs` 各 level 与 `silent`**：仅验证 `level=info`；`error`/`warning`/`debug`/`silent` 的过滤行为未逐一实测。
+7. **`/logs` 各 level 与 `silent`**：**部分已收口**（见 §3.3.2）：`debug`（含 info）与 `info` 已实测；`warning`/`error`/`silent` 因本次无法稳定产出对应级别日志**仍未验证**。
 8. **`/rules/disable` 重启后是否重置**：文档说会重置，本次**未做重启后复测**。
 9. **`/connections?interval=` 的实际推送频率**：源码显示支持（默认 1000ms），但实测计时受并发干扰，未严格验证自定义间隔。
 10. **Unix socket 在 Linux 上的默认权限**：实测 macOS 为 `0666`（受 umask 影响）。**Linux + systemd 下的实际权限与 umask 交互未验证** —— 这是安全关键项，必须在目标平台复测。

@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use proxy_application::ports::PortError;
+use proxy_application::ports::mihomo_observer::BoxStream;
 
 use super::transport::{Request, Response, Transport};
 
@@ -96,6 +97,65 @@ impl Transport for LoopbackTransport {
             .map_err(|e| PortError::Transport(format!("cannot read response: {e}")))?;
 
         Ok(Response { status, body })
+    }
+
+    async fn open_stream(
+        &self,
+        request: Request,
+    ) -> Result<BoxStream<Result<String, PortError>>, PortError> {
+        let method = match request.method {
+            super::transport::Method::Get => reqwest::Method::GET,
+            super::transport::Method::Put => reqwest::Method::PUT,
+            super::transport::Method::Patch => reqwest::Method::PATCH,
+            super::transport::Method::Delete => reqwest::Method::DELETE,
+        };
+
+        let url = format!("{}{}", self.base_url, request.path);
+        let mut builder = self.client.request(method, &url).bearer_auth(&self.secret);
+        if let Some(body) = request.body {
+            builder = builder.body(body);
+            if let Some(content_type) = request.content_type {
+                builder = builder.header(reqwest::header::CONTENT_TYPE, content_type);
+            }
+        }
+
+        let response = builder.send().await.map_err(classify)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(PortError::InvalidResponse(format!(
+                "the kernel answered {status} for a stream request"
+            )));
+        }
+
+        // `reqwest` decodes the transfer encoding, so the only work left is line
+        // splitting. That is the one place this difference from the unix transport
+        // is worth stating: there, chunk framing is decoded by hand because the
+        // socket is read directly.
+        let mut body = response.bytes_stream();
+        let stream = async_stream::stream! {
+            use futures_util::StreamExt as _;
+            let mut line = String::new();
+            while let Some(chunk) = body.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        line.push_str(&String::from_utf8_lossy(&bytes));
+                        while let Some(index) = line.find('\n') {
+                            let document: String = line.drain(..=index).collect();
+                            let trimmed = document.trim();
+                            if !trimmed.is_empty() {
+                                yield Ok(trimmed.to_owned());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(PortError::Transport(format!("stream read failed: {e}")));
+                        return;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
     }
 
     fn timeout(&self) -> Duration {

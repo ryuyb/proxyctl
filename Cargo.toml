@@ -23,6 +23,18 @@ thiserror = "2"
 async-trait = "0.1"
 tokio = { version = "1", default-features = false }
 futures-core = "0.3"
+# The byte buffer type in reqwest's streaming API. Naming it is required to write
+# the stream's type out; reqwest does not re-export it.
+bytes = "1"
+# `StreamExt::next` for the HTTP transport's stream loop. `futures-core` holds the
+# traits only; the combinators live here. Already in the tree as a dependency of
+# `async-stream`, so naming it adds no new code.
+futures-util = { version = "0.3", default-features = false }
+# Turns an `async` block containing `yield` into a `Stream`. Hand-writing the
+# equivalent means a manual `poll_next` state machine, which for a read loop with
+# a decoder and two branches is where the bugs would live; the macro keeps the
+# control flow readable and needs no `unsafe`.
+async-stream = "0.3"
 serde = "1"
 serde_json = "1"
 # The deployment configuration file. `toml` is in the AGENTS.md baseline, and it
@@ -38,7 +50,9 @@ nix = { version = "0.30", default-features = false }
 # The HTTP interface. `axum` for routing, `hyper` for the connection loop: the
 # server cannot use `axum::serve` because `SO_PEERCRED` must be read per
 # connection, which `axum::serve` hides.
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query"] }
+# `tokio` is required for streaming bodies: the log endpoint holds the connection
+# open, and without it a `Body::from_stream` is unavailable.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 # Metadata storage. `bundled` compiles SQLite in rather than linking a system

@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use proxy_application::ports::PortError;
+use proxy_application::ports::mihomo_observer::BoxStream;
 
 /// An HTTP request the kernel understands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +133,38 @@ pub trait Transport: Send + Sync {
     /// rejection means, because for configuration reload it is an expected
     /// business outcome rather than a fault.
     async fn send(&self, request: Request) -> Result<Response, PortError>;
+
+    /// Opens a request whose response body arrives incrementally.
+    ///
+    /// # Why this is not `send`
+    ///
+    /// [`send`](Self::send) waits for the body to end. The observation endpoints
+    /// never end — measured against the kernel, `/traffic`, `/memory`,
+    /// `/connections`, and `/logs` all hold the connection open until the client
+    /// gives up, and all four use `Transfer-Encoding: chunked`. So this returns a
+    /// stream of documents instead of a document.
+    ///
+    /// # Two independent timeouts
+    ///
+    /// Establishing the connection is bounded by [`timeout`](Self::timeout). After
+    /// that, an idle stream is **normal**: `/logs` on a quiet instance sends
+    /// nothing for minutes, and it does not even flush its response headers until
+    /// the first line exists. A stream that produced nothing and was killed would
+    /// be indistinguishable from one that is working, so the timeout applies to
+    /// the connection and not to the silence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError::Unreachable`] or [`PortError::Timeout`] when the
+    /// connection cannot be established, and [`PortError::InvalidResponse`] when
+    /// the response head is unusable. A non-2xx status is reported as an error
+    /// here, unlike [`send`](Self::send): a stream has no caller-side way to
+    /// inspect a rejection, because the caller asked for a stream rather than for
+    /// a status.
+    async fn open_stream(
+        &self,
+        request: Request,
+    ) -> Result<BoxStream<Result<String, PortError>>, PortError>;
 
     /// The request timeout in force.
     fn timeout(&self) -> Duration;

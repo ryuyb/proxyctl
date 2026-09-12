@@ -25,6 +25,8 @@ reqwest = { workspace = true, features = ["json", "stream"] }
 tokio = { workspace = true, features = ["sync", "net", "time", "fs", "io-util", "process"] }
 http = { workspace = true }
 futures-core = { workspace = true }
+async-stream = { workspace = true }
+futures-util = { workspace = true }
 # Signal delivery. Used instead of a hand-rolled `extern "C"` binding because
 # this crate forbids unsafe code, and a wrapper crate is the honest way to get a
 # syscall without weakening that guarantee for the whole layer.

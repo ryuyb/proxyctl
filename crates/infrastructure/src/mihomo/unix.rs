@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use proxy_application::ports::PortError;
+use proxy_application::ports::mihomo_observer::BoxStream;
+use tokio::io::AsyncReadExt;
 
+use super::framing::{self, ChunkedDecoder};
 use super::socket::{self, SocketPermissions};
 use super::transport::{Request, Response, Transport};
 
@@ -119,6 +122,125 @@ impl Transport for UnixSocketTransport {
         parse(&buffer)
     }
 
+    async fn open_stream(
+        &self,
+        request: Request,
+    ) -> Result<BoxStream<Result<String, PortError>>, PortError> {
+        use tokio::io::AsyncWriteExt;
+
+        // Only establishing the connection is bounded. The read loop below is
+        // deliberately unbounded: an idle observation stream is the normal state
+        // of a quiet instance, and a timeout there would turn "nothing is
+        // happening" into a fault.
+        let mut stream = tokio::time::timeout(
+            self.timeout,
+            tokio::net::UnixStream::connect(&self.socket_path),
+        )
+        .await
+        .map_err(|_| PortError::Timeout(self.timeout))?
+        .map_err(|e| {
+            PortError::Unreachable(Box::new(std::io::Error::new(
+                e.kind(),
+                format!("cannot connect to {}: {e}", self.socket_path.display()),
+            )))
+        })?;
+
+        let raw = render(&request);
+        tokio::time::timeout(self.timeout, stream.write_all(raw.as_bytes()))
+            .await
+            .map_err(|_| PortError::Timeout(self.timeout))?
+            .map_err(|e| PortError::Transport(format!("write failed: {e}")))?;
+
+        // The head must be read before the stream is handed back, so a rejection
+        // is reported as an error from this call rather than as a stream that
+        // immediately ends. `/logs` does not flush its head until the first line
+        // exists, so this read is bounded by the connect timeout rather than
+        // waiting indefinitely.
+        let (status, body, chunked) = tokio::time::timeout(self.timeout, read_head(&mut stream))
+            .await
+            .map_err(|_| PortError::Timeout(self.timeout))??;
+
+        if !(200..300).contains(&status) {
+            return Err(PortError::InvalidResponse(format!(
+                "the kernel answered {status} for a stream request"
+            )));
+        }
+
+        let stream = async_stream::stream! {
+            if chunked {
+                // Decode chunked framing and split on newlines: the kernel sends
+                // one JSON document per line, but a document can straddle two
+                // chunks, so reassembly happens here rather than per chunk.
+                let mut decoder = ChunkedDecoder::new();
+                decoder.push(&body);
+                let mut line = String::new();
+                let mut scratch = vec![0u8; 8192];
+
+                loop {
+                    loop {
+                        match decoder.next_chunk() {
+                            Ok(Some(chunk)) => {
+                                line.push_str(&String::from_utf8_lossy(&chunk));
+                                // Emit every complete line the buffer now holds.
+                                while let Some(index) = line.find('\n') {
+                                    let document: String = line.drain(..=index).collect();
+                                    let trimmed = document.trim();
+                                    if !trimmed.is_empty() {
+                                        yield Ok(trimmed.to_owned());
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
+                        }
+                    }
+
+                    if decoder.is_finished() {
+                        return;
+                    }
+
+                    match stream.read(&mut scratch).await {
+                        Ok(0) => return,
+                        Ok(n) => decoder.push(&scratch[..n]),
+                        Err(e) => {
+                            yield Err(PortError::Transport(format!("read failed: {e}")));
+                            return;
+                        }
+                    }
+                }
+            } else {
+                // An unchunked body is read to its end; the kernel does not do
+                // this for the observation endpoints today, but a proxy in front
+                // of it could, and silently mis-parsing it would be worse.
+                let mut line = String::from_utf8_lossy(&body).into_owned();
+                for document in take_lines(&mut line) {
+                    yield Ok(document);
+                }
+                let mut scratch = vec![0u8; 8192];
+                loop {
+                    match stream.read(&mut scratch).await {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            line.push_str(&String::from_utf8_lossy(&scratch[..n]));
+                            for document in take_lines(&mut line) {
+                                yield Ok(document);
+                            }
+                        }
+                        Err(e) => {
+                            yield Err(PortError::Transport(format!("read failed: {e}")));
+                            return;
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+
     fn timeout(&self) -> Duration {
         self.timeout
     }
@@ -126,6 +248,52 @@ impl Transport for UnixSocketTransport {
     fn describe(&self) -> String {
         format!("unix:{}", self.socket_path.display())
     }
+}
+
+/// Reads the response head, leaving any body bytes already received.
+///
+/// Returns the status, the body bytes that accompanied the head, and whether the
+/// body is chunked. Retries the read until the head is complete: the kernel is
+/// permitted to send the head in pieces, and `/logs` sends nothing at all until
+/// its first log line exists.
+async fn read_head(stream: &mut tokio::net::UnixStream) -> Result<(u16, Vec<u8>, bool), PortError> {
+    let mut buffer = Vec::with_capacity(8192);
+    let mut scratch = [0u8; 4096];
+    loop {
+        match framing::split_head(&buffer)? {
+            Some(head) => return Ok((head.status, head.body, head.chunked)),
+            None => {
+                let read = stream
+                    .read(&mut scratch)
+                    .await
+                    .map_err(|e| PortError::Transport(format!("read failed: {e}")))?;
+                if read == 0 {
+                    return Err(PortError::InvalidResponse(
+                        "the connection closed before a response head arrived".to_owned(),
+                    ));
+                }
+                buffer.extend_from_slice(&scratch[..read]);
+            }
+        }
+    }
+}
+
+/// Removes and returns every complete document from `buffer`, leaving any
+/// trailing partial line for the next read.
+///
+/// Returned as owned strings rather than yielded directly, because a `yield`
+/// inside a loop that also borrows the buffer cannot be expressed; the caller
+/// yields them one at a time.
+fn take_lines(buffer: &mut String) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Some(index) = buffer.find('\n') {
+        let document: String = buffer.drain(..=index).collect();
+        let trimmed = document.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_owned());
+        }
+    }
+    out
 }
 
 /// Renders a request as HTTP/1.1.
