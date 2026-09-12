@@ -183,6 +183,19 @@ pub struct RuntimeConfig {
     /// An operator running a converter inside their own network adds that network
     /// here, deliberately.
     pub subscription_allow: Vec<String>,
+    /// Where the agent accepts local management requests.
+    ///
+    /// Defaults to a unix socket under the run directory. TCP is not a supported
+    /// MVP listener: the API carries no transport security of its own, and the
+    /// documented remote path is a reverse proxy with authentication in front.
+    pub socket_path: Option<String>,
+    /// A uid the agent socket's peer credential must present.
+    ///
+    /// `None` leaves the socket's file permissions as the only boundary, which is
+    /// the documented default. Set it when the deployment wants a second check.
+    pub socket_allowed_uid: Option<u32>,
+    /// A gid the agent socket's peer credential must present.
+    pub socket_allowed_gid: Option<u32>,
     /// The kernel controller's shared secret.
     ///
     /// Only meaningful for a loopback controller. Over a unix socket the kernel
@@ -205,6 +218,9 @@ impl RuntimeConfig {
             kernel_data_dir: None,
             scratch_dir: None,
             subscription_allow: Vec::new(),
+            socket_path: None,
+            socket_allowed_uid: None,
+            socket_allowed_gid: None,
             mihomo_secret: None,
         }
     }
@@ -231,8 +247,19 @@ impl RuntimeConfig {
             kernel_data_dir: Some(format!("{root}/lib/mihomo")),
             scratch_dir: Some(format!("{root}/lib/scratch")),
             subscription_allow: Vec::new(),
+            socket_path: Some(format!("{root}/run/agent.sock")),
+            socket_allowed_uid: None,
+            socket_allowed_gid: None,
             mihomo_secret: None,
         }
+    }
+
+    /// The agent's socket path, derived when not set explicitly.
+    #[must_use]
+    pub fn agent_socket_path(&self) -> String {
+        self.socket_path
+            .clone()
+            .unwrap_or_else(|| format!("{}/agent.sock", self.paths.run_dir.trim_end_matches('/')))
     }
 
     /// The kernel's data directory, derived when not set explicitly.

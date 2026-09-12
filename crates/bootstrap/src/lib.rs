@@ -37,3 +37,42 @@ pub use config::{
     ControllerEndpoint, ConverterConfig, DEFAULT_KERNEL_BINARY, DataPaths, RuntimeConfig,
 };
 pub use real_factory::RealFactory;
+
+/// Builds the HTTP interface for an assembled context.
+///
+/// The composition root owns this because starting a listener is a composition
+/// decision — which transport, on which path, with which access policy — rather
+/// than something the application or the adapter should decide.
+///
+/// # Errors
+///
+/// Returns [`BootstrapError::InvalidConfig`] when the socket path is unusable.
+pub fn build_http_server(
+    context: std::sync::Arc<proxy_application::AppContext>,
+    config: &RuntimeConfig,
+) -> Result<proxy_interfaces::http::HttpServer, BootstrapError> {
+    use proxy_interfaces::http::server::SocketSpec;
+    use proxy_interfaces::http::state::{AppState, AuthPolicy};
+
+    let path = config.agent_socket_path();
+    if path.trim().is_empty() {
+        return Err(BootstrapError::InvalidConfig(
+            "the agent socket path must not be empty".to_owned(),
+        ));
+    }
+
+    // The socket is the only MVP listener, so a bearer token is not required: the
+    // socket's file permissions are the boundary, and the peer check is applied
+    // only when a deployment names a uid or gid.
+    let policy = AuthPolicy {
+        allowed_uid: config.socket_allowed_uid,
+        allowed_gid: config.socket_allowed_gid,
+        require_bearer: false,
+    };
+
+    let state = AppState::new(context, policy);
+    Ok(proxy_interfaces::http::HttpServer::new(
+        state,
+        SocketSpec::new(path),
+    ))
+}

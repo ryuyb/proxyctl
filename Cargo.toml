@@ -5,6 +5,7 @@ members = [
     "crates/domain",
     "crates/application",
     "crates/infrastructure",
+    "crates/interfaces",
     "crates/bootstrap",
 ]
 
@@ -27,6 +28,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 http = "1"
 tempfile = "3"
 nix = { version = "0.30", default-features = false }
+# The HTTP interface. `axum` for routing, `hyper` for the connection loop: the
+# server cannot use `axum::serve` because `SO_PEERCRED` must be read per
+# connection, which `axum::serve` hides.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 # Metadata storage. `bundled` compiles SQLite in rather than linking a system
 # library, so the agent does not depend on the distribution's sqlite version.
 rusqlite = { version = "0.40", default-features = false }

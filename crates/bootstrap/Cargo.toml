@@ -22,6 +22,9 @@ proxy-application = { path = "../application" }
 # port traits and their implementations, which is what makes the dependency
 # direction legitimate here and nowhere else.
 proxy-infrastructure = { path = "../infrastructure" }
+# The interface layer is composed here like any other adapter: it is started by
+# the composition root, not by the application.
+proxy-interfaces = { path = "../interfaces" }
 thiserror.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync"] }
