@@ -54,7 +54,7 @@ const prettyYaml = req.query.prettyYaml ?? req.query['pretty-yaml'];
 |---|---|---|---|
 | `url` | string | 覆盖该订阅的远端地址（可带 `#insecure` 等后缀，见 `download.js:632-667`） | 源码 + `[实测]` 覆盖成功 |
 | `ua` | string | 拉取远端订阅时使用的 User-Agent | 源码 |
-| `content` | string | 直接内联订阅内容（绕过远端拉取） | 源码 |
+| `content` | string | 直接内联订阅内容（绕过远端拉取）。**实测：仅接受 raw 文本，base64 / `data:` 不解码；且不能替代入库——订阅名必须已存在** | 源码 + 实测（Q023） |
 | `mergeSources` | string | 合并来源（**在 `/share/*` 路由上被显式禁止**，返回 400 `UNSUPPORTED_SHARE_SUB_MERGE_SOURCES`） | 源码 `download.js:165-183` |
 | `ignoreFailedRemoteSub` | flag | 远端拉取失败时的降级策略（有独立模块 `ignore-failed-remote-sub`） | 源码 |
 | `produceType` | string | 产出类型（`internal` 等） | 源码 |
@@ -311,7 +311,7 @@ curl "http://127.0.0.1:13001/download/agenttmp?target=clash"
 | O2 | `POST /api/subs` 的字段契约稳定性 | 写入路径可能随前端演进破坏 | 跟踪上游 release note；考虑改为"用户自行在 Sub-Store 建订阅，Agent 只读"的保守模式 |
 | O3 | 大订阅（数千节点）的输出大小与耗时 | 影响超时与内存策略 | 需在真实订阅上实测 |
 | O4 | 缓存行为（`noCache` 是否真绕过、缓存 TTL） | 影响"订阅更新是否即时生效" | 连续请求观察结果是否变化 |
-| O5 | `content=` 内联内容的编码契约（base64? raw?） | 决定是否能完全避开"先入库" | 实测 `content=<base64>` 与 raw 两种 |
+| O5 | ~~`content=` 内联内容的编码契约（base64? raw?）~~ **✅ 已答（2026-09-12 实测）** | ~~决定是否能完全避开先入库~~ → **结论：不能避开；`content=` 只覆盖远端抓取。编码契约为 raw，base64 不解码** | 已实测，见 Q023 |
 | O6 | BACKEND PREFIX 与 `/download/:name` 的路径拼接规则 | 影响 Adapter URL 构造 | 已在实测中观察到 `[BACKEND PREFIX] 127.0.0.1:13010/secretpath`，但未验证 `/download` 是否也在前缀下 |
 | O7 | Docker 路径下的行为差异 | 部署模板 | Docker Hub 不可达，未实测（R05 同样受限） |
 | O8 | producer 输出的 `proxy-groups` 是否真的从不生成 | 若某些 target 会生成 groups，则需按 target 分别处理 | 遍历全部 target 实测（本次仅验证 Clash/ClashMeta/mihomo） |
