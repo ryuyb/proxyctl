@@ -1,6 +1,7 @@
 //! Kernel control adapters.
 
 pub mod adapter;
+pub mod connections;
 pub mod framing;
 pub mod http;
 pub mod observer;

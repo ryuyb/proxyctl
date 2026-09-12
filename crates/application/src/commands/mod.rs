@@ -13,11 +13,13 @@
 //! [`StartMihomo::execute`].
 
 pub mod activate_config;
+pub mod connections;
 pub mod lifecycle;
 pub mod rollback_config;
 pub mod update_subscription;
 
 pub use activate_config::{ActivateConfig, ActivateConfigInput, ActivateConfigOutput};
+pub use connections::{CloseAllConnections, CloseConnection, CloseReport, ListConnections};
 pub use lifecycle::{
     ReloadMihomo, RestartMihomo, StartMihomo, StartOutcome, StopMihomo, StopOutcome, signal_kernel,
 };
