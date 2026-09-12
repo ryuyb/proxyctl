@@ -413,6 +413,50 @@ Agent 主动 chmod 0660   → srw-rw---- ，且 API 仍返回 200（功能不受
 **仍未验证**：`SO_PEERCRED` 在 Rust/tokio 下的可用性与具体 API（属实现阶段）；
 以及真实 PVE LXC 上的权限表现。
 
+### 4.2.3 真机复核：进程身份的恢复与僵尸态（2026-09-12）
+
+实现 `ProcessManager` 适配器时，在**同一台真机**（Debian forky / aarch64，mihomo v1.19.30）
+上核对进程事实，推翻了两个"想当然"的假设。
+
+**假设一被推翻：`/proc/<pid>/cwd` 等于 `-d` 参数。**
+
+| 观测项 | 实测值 |
+|---|---|
+| `readlink /proc/<pid>/exe` | `/tmp/mhbin` |
+| `readlink /proc/<pid>/cwd` | **启动时所在目录**（不是 `-d` 指定的目录） |
+| `/proc/<pid>/cmdline` | `/tmp/mhbin -d <工作目录> -f <配置>` |
+
+后果：若按 `cwd == working_dir` 判定"这个进程是我们的内核"，**永远不会匹配到真实 mihomo**。
+可用的判别依据只有两条：**可执行文件路径** + **命令行里作为独立参数出现的工作目录**
+（必须按"独立参数"精确比较，否则 `/var/lib/kernel` 会误匹配 `/var/lib/kernel-2`）。
+
+**假设二被推翻：pid 存活 == 进程存活。**
+
+实测到真实的**僵尸泄漏**：对未 reap 的子进程，`/proc/<pid>/stat` 依然可读且
+`state = Z`，因此仅凭"pid 是否存在"判断存活会**永远报活**，`stop()` 一直等到超时。
+正确做法：
+
+```text
+存活判定 = (start_time 与记录一致) AND (state ∉ {Z, X, x})
+```
+
+并且该情形下对外应报告为"已退出"，而不是"仍在运行"。
+
+**顺带确认的身份事实**（对应 ADR-003 D4b）：
+
+| 事实 | 实测结果 |
+|---|---|
+| 子进程在父进程退出后是否存活 | **存活**（reparent 到 init） |
+| 非父进程能否按 pid 发信号 | **能** |
+| mihomo 是否写 pid 文件 | **不写**（R03 已记录） |
+
+⇒ Agent 重启后必须能从 `/proc` **重新发现**内核，否则会 spawn 出第二个内核（端口冲突）
+或永远停不掉第一个。`(pid, start_time)` 才构成稳定身份，pid 会被复用。
+
+**对实现的直接指导**：`discover()` 的匹配不得依赖 `cwd`；`is_alive()` 不得只查 pid；
+测试必须用**真 mihomo 二进制**——用 `sleep` 之类会被 `-d` 直接拒绝，用 shell 脚本
+则 `/proc/<pid>/exe` 指向解释器而非脚本本身，两者都会产生假阳性。
+
 ### 4.2 `NoNewPrivileges=` 与 `AmbientCapabilities=` 的交互（重点）
 
 **结论：两者可以同时使用，是官方推荐组合。**
