@@ -30,8 +30,10 @@ pub mod adapter_factory;
 pub mod composition;
 pub mod config;
 pub mod event_bridge;
+pub mod listener;
 pub mod log_forwarder;
 pub mod real_factory;
+pub mod tokens;
 
 pub use adapter_factory::AdapterFactory;
 pub use composition::{Bootstrap, BootstrapError, SupervisionModel, supervision_model};
@@ -54,8 +56,9 @@ pub fn build_http_server(
     context: std::sync::Arc<proxy_application::AppContext>,
     config: &RuntimeConfig,
     events: Option<std::sync::Arc<dyn proxy_interfaces::http::state::EventSource>>,
+    has_tokens: bool,
 ) -> Result<proxy_interfaces::http::HttpServer, BootstrapError> {
-    use proxy_interfaces::http::server::SocketSpec;
+    use proxy_interfaces::http::server::{ListenConfigSpec, SocketSpec, TcpSpec};
     use proxy_interfaces::http::state::{AppState, AuthPolicy};
 
     let path = config.agent_socket_path();
@@ -65,24 +68,45 @@ pub fn build_http_server(
         ));
     }
 
-    // The socket is the only MVP listener, so a bearer token is not required: the
-    // socket's file permissions are the boundary, and the peer check is applied
-    // only when a deployment names a uid or gid.
-    let policy = AuthPolicy {
-        allowed_uid: config.socket_allowed_uid,
-        allowed_gid: config.socket_allowed_gid,
-        require_bearer: false,
+    // Whether a bearer token is required depends on the transport, and the socket
+    // keeps its documented default: file permissions are the boundary there, and a
+    // token requirement on top of them would lock out a correctly configured
+    // local client whose uid mapped differently than expected.
+    let listener = listener::decide(config.api_bind.as_deref(), has_tokens)
+        .map_err(|refusal| BootstrapError::InvalidConfig(refusal.message()))?;
+
+    let spec = match listener {
+        listener::ListenerDecision::SocketOnly => {
+            ListenConfigSpec::Socket(SocketSpec::new(path.clone()))
+        }
+        listener::ListenerDecision::Listen { address, .. } => {
+            ListenConfigSpec::Tcp(TcpSpec::allowing(address, config.cors_origins.clone()))
+        }
     };
 
-    // The event source is optional so a composition without one still serves. The
-    // endpoint reports its absence rather than hanging, which is what lets an
-    // operator tell a quiet system from a wiring mistake.
+    let policy = match &spec {
+        ListenConfigSpec::Socket(_) => AuthPolicy {
+            allowed_uid: config.socket_allowed_uid,
+            allowed_gid: config.socket_allowed_gid,
+            require_bearer: false,
+        },
+        // A TCP caller is identified only by its token, so the token is mandatory.
+        // This is not conditional on the address being off-host: loopback is not a
+        // trust boundary, and one unconditional rule is one thing to verify.
+        ListenConfigSpec::Tcp(_) => AuthPolicy {
+            allowed_uid: None,
+            allowed_gid: None,
+            require_bearer: true,
+        },
+    };
+
     let state = match events {
         Some(events) => AppState::with_events(context, policy, events),
         None => AppState::new(context, policy),
     };
-    Ok(proxy_interfaces::http::HttpServer::new(
-        state,
-        SocketSpec::new(path),
+    // The socket path is passed even for a port-only configuration, because the
+    // socket is always served alongside the port.
+    Ok(proxy_interfaces::http::HttpServer::with_listener(
+        state, spec, path,
     ))
 }

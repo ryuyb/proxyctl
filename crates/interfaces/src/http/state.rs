@@ -74,6 +74,12 @@ pub struct AppState {
     /// unavailability rather than hanging, because a subscriber waiting forever on
     /// a channel nobody publishes to is indistinguishable from a quiet system.
     pub events: Option<Arc<dyn EventSource>>,
+    /// Browser origins permitted to call the API.
+    ///
+    /// Empty means no CORS headers are sent at all, so a same-origin page works and
+    /// a browser blocks everything else. Only a TCP listener sets this: a unix
+    /// socket cannot be reached by a browser, so it has nothing to permit.
+    pub cors_origins: Vec<String>,
 }
 
 impl AppState {
@@ -84,6 +90,7 @@ impl AppState {
             ctx,
             auth,
             events: None,
+            cors_origins: Vec::new(),
         }
     }
 
@@ -98,6 +105,7 @@ impl AppState {
             ctx,
             auth,
             events: Some(events),
+            cors_origins: Vec::new(),
         }
     }
 }

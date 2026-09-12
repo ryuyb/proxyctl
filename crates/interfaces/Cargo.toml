@@ -31,7 +31,9 @@ async-stream = { workspace = true }
 hyper.workspace = true
 hyper-util.workspace = true
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.7", features = ["trace", "limit"] }
+# `cors` for the TCP listener's browser origins. `trace` and `limit` are already in
+# use.
+tower-http = { version = "0.7", features = ["trace", "limit", "cors"] }
 # The peer credential is read through tokio's safe wrapper; no unsafe here.
 nix = { workspace = true, features = ["user"] }
 async-trait.workspace = true

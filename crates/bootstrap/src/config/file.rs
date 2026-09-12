@@ -72,6 +72,28 @@ pub struct FileConfig {
     /// Outbound and probe policy.
     #[serde(default)]
     pub security: Option<SecuritySection>,
+    /// The network listener.
+    #[serde(default)]
+    pub api: Option<ApiSection>,
+}
+
+/// The `[api]` section.
+///
+/// Omitting the whole section keeps the agent on the unix socket only, which is
+/// the documented default: a socket cannot be reached from another machine, so it
+/// cannot be exposed by accident. Listening on a port is an explicit act.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiSection {
+    /// The address to listen on, such as `0.0.0.0:8765` or `127.0.0.1:8765`.
+    pub bind: Option<String>,
+    /// Origins permitted to call the API from a browser.
+    ///
+    /// Empty means no cross-origin request is allowed, which is the safe default:
+    /// a same-origin page still works, and a browser blocks the rest. Entries are
+    /// matched exactly; there is no wildcard, because a wildcard here means "any
+    /// site may drive this agent".
+    pub cors_origins: Option<Vec<String>>,
 }
 
 /// The `[agent]` section.
@@ -251,6 +273,24 @@ impl FileConfig {
             .as_ref()
             .and_then(|s| s.publish_mihomo_logs)
             .unwrap_or(false)
+    }
+
+    /// The address to listen on, when the deployment asked for one.
+    #[must_use]
+    pub fn api_bind(&self) -> Option<String> {
+        self.api
+            .as_ref()
+            .and_then(|a| a.bind.clone())
+            .filter(|b| !b.trim().is_empty())
+    }
+
+    /// The permitted browser origins.
+    #[must_use]
+    pub fn cors_origins(&self) -> Vec<String> {
+        self.api
+            .as_ref()
+            .and_then(|a| a.cors_origins.clone())
+            .unwrap_or_default()
     }
 }
 

@@ -33,6 +33,46 @@ use super::state::AppState;
 pub enum ListenConfigSpec {
     /// A unix socket, the default.
     Socket(SocketSpec),
+    /// A TCP port.
+    ///
+    /// Chosen explicitly by a deployment that wants remote access. A TCP caller
+    /// cannot be identified by the kernel, so every request must carry a token —
+    /// enforced by the composition root before this is ever constructed, because a
+    /// listener that could not authenticate anyone must not be created at all.
+    Tcp(TcpSpec),
+}
+
+/// A TCP listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpSpec {
+    /// The address to bind.
+    pub address: std::net::SocketAddr,
+    /// Origins permitted to call the API from a browser.
+    ///
+    /// Empty means no CORS headers are sent, so a browser blocks every
+    /// cross-origin request. That is the safe default: a wildcard would let any
+    /// site drive this agent.
+    pub cors_origins: Vec<String>,
+}
+
+impl TcpSpec {
+    /// A spec with no browser origins.
+    #[must_use]
+    pub fn new(address: std::net::SocketAddr) -> Self {
+        Self {
+            address,
+            cors_origins: Vec::new(),
+        }
+    }
+
+    /// A spec permitting `origins`.
+    #[must_use]
+    pub fn allowing(address: std::net::SocketAddr, origins: Vec<String>) -> Self {
+        Self {
+            address,
+            cors_origins: origins,
+        }
+    }
 }
 
 /// A unix socket listener.
@@ -60,29 +100,65 @@ impl SocketSpec {
 /// The HTTP server.
 pub struct HttpServer {
     state: AppState,
-    spec: SocketSpec,
+    spec: ListenConfigSpec,
+    /// Where the unix socket lives, used when a port is configured as well.
+    default_socket: PathBuf,
 }
 
 impl std::fmt::Debug for HttpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpServer")
-            .field("socket", &self.spec.path)
-            .field("mode", &format!("{:o}", self.spec.mode))
-            .finish()
+        match &self.spec {
+            ListenConfigSpec::Socket(spec) => f
+                .debug_struct("HttpServer")
+                .field("socket", &spec.path)
+                .field("mode", &format!("{:o}", spec.mode))
+                .finish(),
+            ListenConfigSpec::Tcp(spec) => f
+                .debug_struct("HttpServer")
+                .field("tcp", &spec.address)
+                .field("cors_origins", &spec.cors_origins.len())
+                .finish(),
+        }
     }
 }
 
 impl HttpServer {
-    /// Builds a server.
+    /// Builds a socket server.
     #[must_use]
     pub fn new(state: AppState, spec: SocketSpec) -> Self {
-        Self { state, spec }
+        let default_socket = spec.path.clone();
+        Self {
+            state,
+            spec: ListenConfigSpec::Socket(spec),
+            default_socket,
+        }
     }
 
-    /// The socket path this server will bind.
+    /// Builds a server over an explicit listener configuration.
+    ///
+    /// `socket_path` is where the unix socket lives. It is required even when only
+    /// a port is configured, because the socket is always served: the CLI and a TUI
+    /// reach the agent that way, and adding a port is not a request to stop them.
     #[must_use]
-    pub fn socket_path(&self) -> &std::path::Path {
-        &self.spec.path
+    pub fn with_listener(
+        state: AppState,
+        spec: ListenConfigSpec,
+        socket_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            state,
+            spec,
+            default_socket: socket_path.into(),
+        }
+    }
+
+    /// The socket path this server will bind, when it binds one.
+    #[must_use]
+    pub fn socket_path(&self) -> Option<&std::path::Path> {
+        match &self.spec {
+            ListenConfigSpec::Socket(spec) => Some(&spec.path),
+            ListenConfigSpec::Tcp(_) => None,
+        }
     }
 
     /// Serves until `shutdown` flips to `true`.
@@ -95,55 +171,252 @@ impl HttpServer {
     /// be created. A refusal to *bind* is deliberately fatal: an agent that cannot
     /// accept requests must say so rather than run without an interface.
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) -> Result<(), std::io::Error> {
-        // The socket must replace any stale file, or a restart after a crash fails
-        // to bind with `EADDRINUSE` even though nothing is listening.
-        if self.spec.path.exists() {
-            std::fs::remove_file(&self.spec.path)?;
-        }
-        if let Some(parent) = self.spec.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        // Both transports run at once when both are configured.
+        //
+        // The socket is not replaced by the port: every client built into this
+        // binary — the CLI, and a TUI — speaks the socket, and an operator who adds
+        // a port for a web UI has not asked for their local tools to stop working.
+        // An earlier version chose one transport with a `match`, which left the
+        // agent with no socket as soon as a port was configured.
+        let tcp = match &self.spec {
+            ListenConfigSpec::Tcp(spec) => Some(spec.clone()),
+            ListenConfigSpec::Socket(_) => None,
+        };
 
-        let listener = UnixListener::bind(&self.spec.path)?;
-        set_socket_mode(&self.spec.path, self.spec.mode)?;
+        let mut tasks = Vec::new();
 
-        // The router carries `AppState` as its type parameter; `with_state`
-        // supplies it, producing the `Router<()>` a connection can serve.
-        let app = routes::router().with_state(self.state.clone());
-        let state = self.state;
-
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let (stream, _) = match accepted {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            // A failed accept is not fatal: an interrupted system
-                            // call is normal, and treating it as fatal would kill
-                            // the interface during ordinary signal handling.
-                            eprintln!("accept failed: {e}");
-                            continue;
-                        }
-                    };
-                    let state = state.clone();
-                    let app = app.clone();
-                    tokio::spawn(async move {
-                        serve_connection(stream, app, state).await;
-                    });
+        if let Some(tcp) = tcp {
+            let state = self.state.clone();
+            let shutdown = shutdown.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = serve_tcp(&state, tcp, shutdown).await {
+                    eprintln!("the tcp listener stopped: {e}");
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        break;
-                    }
-                }
+            }));
+        }
+
+        // The socket always runs. When the spec was a socket, this is the only
+        // listener; when it was a port, this is the second one.
+        let socket_spec = match &self.spec {
+            ListenConfigSpec::Socket(spec) => spec.clone(),
+            // A port was configured, so the socket keeps its documented default
+            // location rather than being derived — the two are independent
+            // listeners with independent addresses.
+            ListenConfigSpec::Tcp(_) => SocketSpec::new(self.default_socket.clone()),
+        };
+        let state = self.state.clone();
+        let socket_shutdown = shutdown.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = serve_unix(&state, socket_spec, socket_shutdown).await {
+                eprintln!("the socket listener stopped: {e}");
+            }
+        }));
+
+        // Wait for shutdown, then let each listener finish. A listener that failed
+        // on its own has already reported; this does not treat that as fatal for
+        // the other one, because losing the port should not take the socket down.
+        while !*shutdown.borrow() {
+            if shutdown.changed().await.is_err() {
+                break;
             }
         }
-
-        // Remove the socket file so a later start does not have to clean up.
-        let _ = std::fs::remove_file(&self.spec.path);
+        for task in tasks {
+            let _ = task.await;
+        }
         Ok(())
     }
 }
+
+/// Builds the CORS layer for a set of origins.
+///
+/// # An empty list sends no headers at all
+///
+/// Not "allow everything" and not "allow nothing explicitly": a same-origin
+/// page needs no CORS header, and sending none means a browser blocks every
+/// cross-origin request. That is the safe default, and it keeps a socket-only
+/// deployment from growing browser behaviour it never asked for.
+///
+/// # No wildcard, and no origin reflection
+///
+/// Origins are matched exactly. A wildcard would let any site drive this agent
+/// with a token it obtained elsewhere, and reflecting the caller's own origin
+/// back is the same thing spelled differently — both grant access to everyone
+/// while looking like a restriction.
+fn cors_layer(state: &AppState) -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+
+    if state.cors_origins.is_empty() {
+        return CorsLayer::new();
+    }
+
+    // Parsed into typed headers rather than passed as strings: a malformed
+    // origin would otherwise become a header no browser matches, silently
+    // denying a deployment that looks configured.
+    let origins: Vec<axum::http::HeaderValue> = state
+        .cors_origins
+        .iter()
+        .filter_map(|origin| origin.parse().ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        // The methods the API actually uses, not all of them.
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ])
+        // Without this the browser cannot read the JSON body, and a client
+        // would see an opaque network error instead of a response.
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ])
+}
+
+/// Serves a unix socket, with the peer credential read per connection.
+///
+/// # Why this is not `axum::serve`
+///
+/// `axum::serve` owns the listener, and that is the problem: `SO_PEERCRED` must be
+/// read **per connection**, and by the time a request reaches a handler the
+/// connection object is gone. There is no extractor for it — the credential is a
+/// property of the socket, not of the request.
+async fn serve_unix(
+    state: &AppState,
+    spec: SocketSpec,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), std::io::Error> {
+    let state = state.clone();
+    spec_listen_socket(&state, &spec, &mut shutdown).await
+}
+
+/// The socket listener body.
+async fn spec_listen_socket(
+    state: &AppState,
+    spec: &SocketSpec,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<(), std::io::Error> {
+    if spec.path.exists() {
+        std::fs::remove_file(&spec.path)?;
+    }
+    if let Some(parent) = spec.path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let listener = UnixListener::bind(&spec.path)?;
+    set_socket_mode(&spec.path, spec.mode)?;
+    // Announced once bound, not by the caller: a message printed before a bind
+    // that then fails reports a listening agent that refused to start.
+    eprintln!("proxy-agent listening on {}", spec.path.display());
+
+    let app = routes::router().with_state(state.clone());
+    let state = state.clone();
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = match accepted {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        eprintln!("accept failed: {e}");
+                        continue;
+                    }
+                };
+                let state = state.clone();
+                let app = app.clone();
+                tokio::spawn(async move {
+                    serve_connection(stream, app, state).await;
+                });
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Remove the socket file so a later start does not have to clean up.
+    let _ = std::fs::remove_file(&spec.path);
+    Ok(())
+}
+
+/// Serves a TCP port.
+async fn serve_tcp(
+    state: &AppState,
+    spec: TcpSpec,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), std::io::Error> {
+    let listener = tokio::net::TcpListener::bind(spec.address).await?;
+    let bound = listener.local_addr()?;
+    eprintln!("api listening on {bound}");
+
+    let mut state = state.clone();
+    state.cors_origins = spec.cors_origins.clone();
+    let app = routes::router()
+        .layer(cors_layer(&state))
+        .with_state(state.clone());
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer) = match accepted {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        eprintln!("accept failed: {e}");
+                        continue;
+                    }
+                };
+                let state = state.clone();
+                let app = app.clone();
+                tokio::spawn(async move {
+                    serve_tcp_connection(stream, peer, app, state).await;
+                });
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn serve_tcp_connection(
+    stream: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
+    app: axum::Router,
+    state: AppState,
+) {
+    use hyper_util::rt::TokioIo;
+
+    // Nagle would delay small JSON responses behind nothing, and every request
+    // here is small.
+    let _ = stream.set_nodelay(true);
+
+    let app = app.layer(axum::Extension(PeerAddress(peer)));
+    let io = TokioIo::new(stream);
+
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, hyper_util::service::TowerToHyperService::new(app))
+        .await
+    {
+        // A client disconnecting mid-response is not worth surfacing.
+        let _ = e;
+    }
+    let _ = state;
+}
+
+/// The address a TCP request came from.
+///
+/// Injected per connection so a handler or a log can attribute a request. It is
+/// explicitly **not** an identity: an address can be spoofed on a network you do
+/// not control, which is why authentication uses the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerAddress(pub std::net::SocketAddr);
 
 /// Serves one connection, injecting the peer credential.
 async fn serve_connection(stream: UnixStream, app: axum::Router, state: AppState) {

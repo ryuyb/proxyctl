@@ -555,6 +555,41 @@ pub fn merge(inputs: &Inputs) -> Result<Resolved, BootstrapError> {
         allowed_gid.source,
     ));
 
+    // --- the network listener ---------------------------------------------
+    // Absent means "socket only", which is the default and the safe state.
+    let api_bind = inputs
+        .file
+        .as_ref()
+        .and_then(|f| f.api_bind())
+        .map(Attributed::file)
+        .unwrap_or_else(|| Attributed::default_value(String::new()));
+    provenance.push((
+        "api.bind".to_owned(),
+        if api_bind.value.is_empty() {
+            "<unset: unix socket only>".to_owned()
+        } else {
+            api_bind.value.clone()
+        },
+        api_bind.source,
+    ));
+
+    let cors = inputs
+        .file
+        .as_ref()
+        .map(|f| f.cors_origins())
+        .filter(|origins| !origins.is_empty())
+        .map(Attributed::file)
+        .unwrap_or_else(|| Attributed::default_value(Vec::new()));
+    provenance.push((
+        "api.cors_origins".to_owned(),
+        if cors.value.is_empty() {
+            "<empty: no cross-origin requests>".to_owned()
+        } else {
+            cors.value.join(",")
+        },
+        cors.source,
+    ));
+
     let config = RuntimeConfig {
         instance,
         controller,
@@ -570,6 +605,8 @@ pub fn merge(inputs: &Inputs) -> Result<Resolved, BootstrapError> {
         socket_allowed_gid: nonzero(allowed_gid.value),
         mihomo_secret: secret,
         publish_mihomo_logs: publish_logs.value,
+        api_bind: (!api_bind.value.is_empty()).then_some(api_bind.value),
+        cors_origins: cors.value,
     };
 
     Ok(Resolved {

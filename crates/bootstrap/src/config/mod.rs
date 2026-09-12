@@ -243,6 +243,17 @@ pub struct RuntimeConfig {
     /// Off by default: enabling it reads and redacts every kernel log line
     /// continuously, and discloses network activity to anyone who may subscribe.
     pub publish_mihomo_logs: bool,
+    /// The address the API listens on, or `None` for the socket only.
+    ///
+    /// `None` is the default, and the default is the security-relevant part: a
+    /// unix socket cannot be reached from another machine, so it cannot be exposed
+    /// by accident. Listening on a port is something a deployment asks for.
+    pub api_bind: Option<String>,
+    /// Browser origins permitted to call the API.
+    ///
+    /// Empty means no cross-origin request is allowed. Entries match exactly; a
+    /// wildcard would mean any site may drive this agent.
+    pub cors_origins: Vec<String>,
 }
 
 impl RuntimeConfig {
@@ -264,6 +275,8 @@ impl RuntimeConfig {
             socket_allowed_gid: None,
             mihomo_secret: None,
             publish_mihomo_logs: false,
+            api_bind: None,
+            cors_origins: Vec::new(),
         }
     }
 
@@ -294,6 +307,8 @@ impl RuntimeConfig {
             socket_allowed_gid: None,
             mihomo_secret: None,
             publish_mihomo_logs: false,
+            api_bind: None,
+            cors_origins: Vec::new(),
         }
     }
 
