@@ -39,6 +39,7 @@ pub mod context;
 pub mod error;
 pub mod locks;
 pub mod ports;
+pub mod queries;
 
 /// In-memory test doubles with fault injection.
 ///

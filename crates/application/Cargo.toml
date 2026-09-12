@@ -20,7 +20,8 @@ path = "src/lib.rs"
 proxy-domain = { path = "../domain" }
 thiserror.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+# `time` is needed for the readiness poll and for injecting delays in tests.
+tokio = { workspace = true, features = ["sync", "time"] }
 # Used by the observer port for its boxed streams, and by the in-memory doubles
 # that produce empty ones.
 futures-core.workspace = true
@@ -41,6 +42,14 @@ required-features = ["test-support"]
 
 [[test]]
 name = "concurrency"
+required-features = ["test-support"]
+
+[[test]]
+name = "lifecycle"
+required-features = ["test-support"]
+
+[[test]]
+name = "subscription"
 required-features = ["test-support"]
 
 [lints]
