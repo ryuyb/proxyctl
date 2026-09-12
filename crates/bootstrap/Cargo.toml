@@ -27,6 +27,10 @@ proxy-infrastructure = { path = "../infrastructure" }
 proxy-interfaces = { path = "../interfaces" }
 thiserror.workspace = true
 async-trait.workspace = true
+# The deployment configuration file. `toml` brings `serde` and `serde_spanned`
+# with it, which is what lets a parse error name a line and column.
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [features]

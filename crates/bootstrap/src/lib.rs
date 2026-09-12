@@ -34,7 +34,8 @@ pub mod real_factory;
 pub use adapter_factory::AdapterFactory;
 pub use composition::{Bootstrap, BootstrapError, SupervisionModel, supervision_model};
 pub use config::{
-    ControllerEndpoint, ConverterConfig, DEFAULT_KERNEL_BINARY, DataPaths, RuntimeConfig,
+    ControllerEndpoint, ConverterConfig, DEFAULT_CONFIG_PATH, DEFAULT_KERNEL_BINARY, DataPaths,
+    FileConfig, FileConfigError, RuntimeConfig, SecretState,
 };
 pub use real_factory::RealFactory;
 

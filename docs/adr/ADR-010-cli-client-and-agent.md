@@ -72,6 +72,41 @@ proxyctl agent run      守护进程：组装 context，服务 socket
 
 `logs` / `logs -f` 打印 `LOGS_NOT_IMPLEMENTED` 并以 7 退出。留空并返回 0 更糟：脚本会把沉默当成「没有日志」。它需要 observer port（ADR-003），而那个 port 还没有实现。
 
+### D7：配置来源与优先级
+
+`proxyctl agent run` 的配置有四级来源，从高到低：
+
+```text
+① --config / --flag        显式、一次性、覆盖一切
+② 环境变量 PROXYCTL_*      容器与 CI
+③ /etc/proxy-agent/config.toml   部署配置（dpkg conffile）
+④ 内置默认值
+```
+
+- **flag 高于文件**：排障时「临时改一个值试试」必须不需要动配置文件；反过来会让 `--root` 这类开发参数失效。
+- **环境变量夹在中间**：编排系统注入比挂文件方便，但它不该压过显式 flag。
+- **生效值必须可观测**：启动时打印最终配置，且每个字段标注来源（`[flag]` / `[env]` / `[file]` / `[default]`）。现场最常见的失败是「我改了配置但没生效」，没有来源标注只能靠猜。`--print-config` 做同样的事并退出。
+
+**格式**：TOML（本 ADR 沿用 ADR-006 D4 的既定选择；注释友好，§4 要给人手写）。每个 `[section]` 可整体省略，**空文件合法**——否则「只想改一个字段」就得抄全份。
+
+**字段名与 `RuntimeConfig` 一一对应**，不引入配置 DSL。转换层做形状映射而非语义翻译：`endpoint` 含 `/` 即 socket 路径这条规则，在文件与 flag 两条路径上**共用** `runtime::parse_controller`。因该规则会误判相对路径（`./mihomo.sock` 不含 `/`，会被当成 host:port），**文件中的 socket 路径必须绝对**，加载时校验并拒绝相对路径。
+
+### D8：`mihomo_secret` 可以写在文件里，但语义分三种
+
+文件中的 `mihomo_secret` 有三种状态，行为必须分开：
+
+| 文件中 | 含义 | 行为 |
+|---|---|---|
+| 字段省略 | 未指定 | 从 SQLite 生成并持久化（`Bootstrap::resolve_secret` 的现有行为） |
+| 存在但空/空白 | 用户写了空值 | **拒绝启动**。空串不是「未设置」，是**关闭内核认证** |
+| 存在且非空 | 人工指定 | 直接使用，不生成、不覆盖 store |
+
+第三种是易错点：文件值与 store 值会冲突。**文件赢**（它是更显式的意图），但必须在启动日志中**警告**「文件指定了 secret，store 中的已有值被忽略」——否则用户改了 store 却不生效且无从得知。
+
+**权限因此升级为硬约束**：`config.toml` 有任何 group/other 位（`mode & 0o077 != 0`）即**拒绝启动**。这是本条决策的直接后果——在 D8 允许 secret 进文件之前，方案只打算对写位报错、对读位警告；那个判断的前提（文件里没有凭据）现在不成立了。
+
+`RuntimeConfig` 中已有的 `mihomo_secret` 字段保持不动，只增加文件这一入口；`RealFactory::new` 对「loopback 且 secret 空」的硬拒保留，作为第二道防线。
+
 ## Alternatives
 
 ### A1：两个二进制（`proxyctl` + `proxy-agent`）

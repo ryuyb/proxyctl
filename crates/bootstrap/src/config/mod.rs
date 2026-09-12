@@ -1,12 +1,23 @@
-//! Runtime configuration for composition.
+//! Runtime configuration.
 //!
-//! Deliberately small for now. It carries only what adapter *selection* needs,
-//! not adapter *settings*: which transport the controller uses, whether a
-//! converter is configured, and where state lives. The remaining fields arrive
-//! with the real adapters, and adding them here before they can be used would
-//! mean guessing at their shape.
+//! Three layers, and the split is deliberate:
+//!
+//! * [`RuntimeConfig`] is the **composed** form. Every field is resolved and
+//!   nothing is optional, so composition never has to ask "was this set".
+//! * [`file`] is the **on-disk** form. Every section may be absent, it refuses
+//!   unknown keys, and it knows the difference between an absent and an empty
+//!   value.
+//! * [`merge`] joins the file with arguments, the environment, and the built-in
+//!   defaults, and records where each value came from so a misconfiguration can
+//!   be diagnosed instead of guessed at.
 
 use proxy_domain::shared::id::MihomoInstanceId;
+
+pub mod file;
+pub mod merge;
+
+pub use file::{DEFAULT_CONFIG_PATH, FileConfig, FileConfigError, SecretState};
+pub use merge::{Inputs, Resolved, Source};
 
 /// Where the kernel's control API is reachable.
 ///
@@ -67,6 +78,31 @@ pub enum ConverterConfig {
         /// that the network path is trusted.
         allow_non_loopback: bool,
     },
+}
+
+impl ConverterConfig {
+    /// A label for logs and for `--print-config`.
+    ///
+    /// Reports whether the non-loopback opt-in is in force, because that flag is
+    /// the difference between a local converter and one reachable by anything on
+    /// the network, and a label that omitted it would hide that.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::None => "none".to_owned(),
+            Self::External {
+                base_url,
+                allow_non_loopback,
+            } => format!(
+                "substore:{base_url}{}",
+                if *allow_non_loopback {
+                    " (non-loopback allowed)"
+                } else {
+                    ""
+                }
+            ),
+        }
+    }
 }
 
 /// Where persistent state lives.

@@ -1,0 +1,164 @@
+# proxyctl configuration.
+#
+# Location: /etc/proxy-agent/config.toml
+# Mode:     0600 (chmod 600). Any group or other bit makes the loader refuse to
+#           start, because this file may hold the kernel secret.
+#
+# This file is entirely optional. Every section and every field may be omitted;
+# an empty file is valid and yields the defaults below. Values are resolved in
+# this order, highest first:
+#
+#   1. a command-line argument   (one-shot; a debugger's tool)
+#   2. an environment variable   (PROXYCTL_*; how a container injects)
+#   3. this file                 (the deployment's stated intent)
+#   4. the built-in default      (shown as the commented value)
+#
+# Run `proxyctl agent run --print-config` to see what is actually in effect and
+# which source supplied each value. That is the fastest way to answer "I changed
+# this and nothing happened".
+
+
+# ===========================================================================
+# SCAFFOLD — copy this block to the top of the file and edit it.
+#
+# It is here because the reference below is fully commented, and uncommenting
+# single lines out of it is a trap: drop `instance = "x"` into the file without
+# its `[agent]` header and TOML rejects it, because the key belongs to no
+# section. Copying a whole section cannot fail that way.
+#
+# Keep this file at mode 0600. The loader refuses to start otherwise, because
+# the file may hold the kernel secret.
+# ===========================================================================
+#
+# [agent]
+# instance = "default"
+# socket = "/run/proxy-agent/agent.sock"
+#
+# [kernel]
+# binary = "/usr/lib/proxy-agent/mihomo"
+# # Omit to let the agent generate and store one on first use.
+# # secret = "change-me"
+#
+# [controller]
+# endpoint = "/run/proxy-agent/mihomo.sock"
+#
+# [converter]
+# backend = "substore"
+# base_url = "http://127.0.0.1:3001"
+#
+# [security]
+# subscription_allow = ["10.0.0.0/8"]
+# allow_write_probes = false
+
+# ---------------------------------------------------------------------------
+# [agent] — the agent's own interface
+# ---------------------------------------------------------------------------
+#[agent]
+# Which instance to compose for.
+#instance = "default"
+
+# Where management requests are accepted. The socket's file permissions are the
+# access-control boundary; there is no remote listener in this version.
+#socket = "/run/proxy-agent/agent.sock"
+
+# A peer credential the socket must present, checked on top of the file
+# permissions. Unset (0 or absent) leaves the file permissions as the only
+# boundary, which is the documented default — LXC uid mapping can make a correct
+# peer look wrong, and a check that locks an operator out of their own agent is
+# worse than the risk it addresses.
+#allowed_uid = 0
+#allowed_gid = 0
+
+# ---------------------------------------------------------------------------
+# [paths] — where state lives
+# ---------------------------------------------------------------------------
+#[paths]
+# Immutable configuration versions. The core asset; back this up.
+#configs_dir = "/var/lib/proxy-agent/configs"
+
+# Mutable state: the active-version pointer and the metadata database.
+#state_dir = "/var/lib/proxy-agent/state"
+
+# Runtime sockets and lock files. Volatile; needs no backup.
+#run_dir = "/run/proxy-agent"
+
+# ---------------------------------------------------------------------------
+# [kernel] — the mihomo binary and its directories
+# ---------------------------------------------------------------------------
+#[kernel]
+# Absolute path to the kernel binary. Under /usr/lib because the agent replaces
+# it wholesale, and a reader that may be replaced does not belong in /usr/bin.
+#binary = "/usr/lib/proxy-agent/mihomo"
+
+# Where the kernel keeps geo data and its cache. Separate from state_dir because
+# the kernel writes here on a schedule and the agent must not treat its contents
+# as its own.
+#data_dir = "/var/lib/proxy-agent/mihomo"
+
+# Where temporary artifacts and validation sandboxes are created.
+#scratch_dir = "/var/lib/proxy-agent/scratch"
+
+# The kernel controller's shared secret. Only meaningful for a loopback
+# controller (see [controller] below): over a unix socket the kernel does not
+# authenticate requests at all, so the socket's permissions are the whole
+# boundary.
+#
+# Three states, and they differ:
+#   omitted        -> the agent generates one on first use and stores it in the
+#                     database. This is the recommended setting.
+#   secret = ""    -> REFUSED. An empty secret is not "unset": the kernel
+#                     installs no authentication at all when its secret is
+#                     empty, which would expose process control to anything that
+#                     can reach the port.
+#   secret = "..." -> used as given. The stored value is then ignored, and the
+#                     agent warns about the conflict at startup.
+#secret = ""
+
+# ---------------------------------------------------------------------------
+# [controller] — how to reach the kernel's control API
+# ---------------------------------------------------------------------------
+#[controller]
+# A value starting with "/" is a unix socket path; anything else must be
+# "host:port". A relative path is refused rather than guessed at, because
+# "mihomo.sock" would otherwise be read as a host name and the failure would
+# surface much later as an unexplained connection error.
+#
+# The socket is preferred: it is not reachable from off-host, so it cannot be
+# exposed by accident. A loopback address is still a listener, so it requires a
+# secret.
+#endpoint = "/run/proxy-agent/mihomo.sock"
+
+# ---------------------------------------------------------------------------
+# [converter] — subscription conversion
+# ---------------------------------------------------------------------------
+#[converter]
+# Omitting this whole section means no converter: subscription updates that need
+# one fail with an explanatory error and everything else works. That is a
+# supported deployment, not a misconfiguration.
+#
+#backend = "substore"
+#base_url = "http://127.0.0.1:3001"
+
+# Whether a non-loopback base_url is acceptable. Defaults to false, and that
+# default matters: the converter backend has no authentication at all, so
+# anything able to reach it can read and write this agent's subscription
+# records — including the URLs, which carry their own credentials. Set this only
+# when the network path is trusted.
+#allow_non_loopback = false
+
+# ---------------------------------------------------------------------------
+# [security] — outbound and probe policy
+# ---------------------------------------------------------------------------
+#[security]
+# Outbound hosts or CIDR blocks a subscription fetch may reach. Empty means
+# public destinations only: loopback, link-local, cloud metadata, RFC1918,
+# CGNAT, benchmarking ranges, and IPv6 unique-local are all refused. A
+# subscription URL pointing inward would otherwise turn the agent into a probe
+# for the host's internal network. Add your converter's network here only if it
+# genuinely lives there.
+#subscription_allow = []
+
+# Whether to run capability probes that write to the host. Off by default:
+# probes that create devices or touch firewall state can leave residue if
+# interrupted, so they need an explicit opt-in.
+#allow_write_probes = false

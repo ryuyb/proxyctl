@@ -25,6 +25,12 @@ tokio = { version = "1", default-features = false }
 futures-core = "0.3"
 serde = "1"
 serde_json = "1"
+# The deployment configuration file. `toml` is in the AGENTS.md baseline, and it
+# is chosen over reusing `serde_yaml` below because a hand-edited config file
+# benefits from TOML's explicit types: YAML's implicit conversion turns an
+# unquoted `no` into a boolean and `1.0` into a float, which is a poor property
+# for a file whose values are paths, ports, and a secret.
+toml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 http = "1"
 tempfile = "3"

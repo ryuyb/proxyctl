@@ -100,16 +100,25 @@ Debian / Ubuntu + systemd + PVE LXC，x86_64 / aarch64
 
 **主分发形态：deb 包**（install.sh 作为无包管理环境的次选）。
 
+**修正（2026-09-12，阶段 B）**：本决策原先假设两个二进制（`proxy-agent` + `proxyctl`）。
+阶段 B 按 ADR-010 D1 实现为**单二进制两个角色**（`proxyctl <cmd>` 客户端 / `proxyctl agent run` 守护端），
+故此处按既成事实收口。这是一次**文档修正**，不是架构改动；理由与实测体积代价见 ADR-010。
+
 ```text
-/usr/bin/proxy-agent                  二进制（Agent；含内嵌 admin UI 与 metacubexd 静态资源）
-/usr/bin/proxyctl                     CLI
+/usr/bin/proxyctl                     唯一二进制（客户端 + 守护端 + 内嵌 admin UI 与 metacubexd 静态资源）
 /usr/lib/systemd/system/proxy-agent.service
+    ExecStart=/usr/bin/proxyctl agent run --config /etc/proxy-agent/config.toml
 /usr/lib/sysusers.d/proxy-agent.conf  创建 proxy-agent 用户与 proxyctl 组
-/etc/proxy-agent/config.toml          conffile（dpkg 保护，升级不覆盖用户修改）
+/etc/proxy-agent/config.toml          conffile（dpkg 保护，升级不覆盖用户修改）0600
 /var/lib/proxy-agent/                 StateDirectory（configs/ state/ database.sqlite）
 /run/proxy-agent/                     RuntimeDirectory 0750（agent.sock、mihomo.sock）
 /usr/share/doc/proxy-agent/           copyright(DEP-5)、THIRD-PARTY-NOTICES、licenses/
 ```
+
+`config.toml` 的 mode 是 `0600` 而非 conffile 惯用的 `0644`：文件中包含 `mihomo_secret`
+（见 ADR-010 D7 与 ADR-005 D2——loopback controller 下该值就是内核控制的唯一凭据）。
+加载器对任何 group/other 权限位**硬拒**，因此该 mode 是必须的，不是建议。
+`ExecStart` 显式传 `--config`：unit 是权威调用点，路径写错要以「不可读」而不是「不存在」暴露。
 
 **postinst 不得**：enable、start、写用户配置、改网络（C8）。是否启用交给用户显式操作。
 

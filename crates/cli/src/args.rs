@@ -101,9 +101,29 @@ pub enum AgentAction {
 /// The `agent run` arguments.
 #[derive(Debug, Args)]
 pub struct AgentRunArgs {
+    /// The configuration file.
+    ///
+    /// Defaults to the environment, then `/etc/proxy-agent/config.toml`. A
+    /// missing file is not an error: everything falls back to its default, which
+    /// is what makes a development run possible without inventing a file.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Print the effective configuration and where each value came from, then
+    /// exit without serving.
+    ///
+    /// The point is diagnosis: the most common deployment failure is "I changed
+    /// the configuration and nothing happened", and the answer is always which
+    /// source won.
+    #[arg(long)]
+    pub print_config: bool,
+
     /// The instance to compose for.
-    #[arg(long, default_value = "default")]
-    pub instance: String,
+    ///
+    /// No clap default here: the default lives in the merge, so that "was this
+    /// typed" can be told from "was this defaulted" and reported as such.
+    #[arg(long, value_name = "NAME")]
+    pub instance: Option<String>,
 
     /// A root directory for every path, for development.
     ///

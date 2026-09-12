@@ -1,0 +1,83 @@
+[Unit]
+Description=Mihomo management agent
+# No `Documentation=man:` entry: this project ships no man page, and naming one
+# that does not exist makes `systemd-analyze verify` report a failure. The
+# example configuration is the reference instead.
+Documentation=file:/usr/share/doc/proxy-agent/config.toml.example
+# The agent manages the kernel's lifecycle, so it must start before anything
+# that expects a proxy to be listening.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The agent runs as its own unprivileged user. TUN and nftables need
+# CAP_NET_ADMIN, which is granted narrowly below rather than by running as root:
+# a compromise of the control plane should not already be root.
+User=proxy-agent
+Group=proxy-agent
+
+# One binary, two roles: this is the daemon role. The client role is the same
+# file invoked without `agent run`.
+#
+# `--config` is explicit rather than left to the default: the unit is the
+# authoritative call site, and naming the path means a packaging mistake shows up
+# as "cannot read" (which names the file) rather than as silently different
+# defaults.
+ExecStart=/usr/bin/proxyctl agent run --config /etc/proxy-agent/config.toml
+
+# systemd owns the directories so their modes are not a matter of install-time
+# luck. `RuntimeDirectory` *is* the access-control boundary for the agent socket:
+# 0750 on the directory plus 0660 on the socket is what limits who can manage the
+# kernel (ADR-005 D3).
+RuntimeDirectory=proxy-agent
+RuntimeDirectoryMode=0750
+StateDirectory=proxy-agent
+StateDirectoryMode=0700
+ConfigurationDirectory=proxy-agent
+ConfigurationDirectoryMode=0700
+
+# SIGTERM is what a graceful shutdown needs: the listener drains and removes its
+# socket. `Restart=on-failure` restarts a crash but not an operator's `stop`.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+
+# --- hardening ---------------------------------------------------------------
+# The agent is not a general-purpose shell. It never executes a caller-supplied
+# string, so it needs no shell, no home, and no writable system paths.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The directories the agent legitimately writes, re-opened read-write over
+# `ProtectSystem=strict`. Deliberately does not include /etc: configuration is
+# read, never written, so a compromised agent cannot rewrite its own policy.
+ReadWritePaths=/var/lib/proxy-agent /var/lib/proxy-agent/mihomo /run/proxy-agent
+
+# --- capabilities ------------------------------------------------------------
+# CAP_NET_ADMIN is what TUN creation and firewall writes need, and it is the
+# *only* capability granted. Verified on a real LXC: CAP_NET_ADMIN alone suffices
+# for TUNSETIFF, while CAP_SYS_ADMIN alone still returns EPERM.
+#
+# The agent must work without it — HTTP/SOCKS/Mixed proxying is the core product
+# and TUN is the optional one — so a deployment that cannot grant it should
+# comment these lines rather than run as root. `proxyctl doctor` reports which
+# capabilities are actually present.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

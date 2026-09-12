@@ -1,126 +1,109 @@
-//! Turning agent flags into a [`RuntimeConfig`].
+//! Turning `agent run`'s arguments into a composed configuration.
 //!
-//! # Why the flags are not the whole configuration
+//! # Why this is a thin layer now
 //!
-//! A system deployment reads its settings from a file that packaging installs.
-//! That loader does not exist yet, so this module covers the subset the daemon
-//! needs to start today, and it says so rather than implying the flags are the
-//! intended interface.
+//! This module used to build a [`RuntimeConfig`] by hand from flags, which meant
+//! the precedence rules lived here for flags and would have had to be written a
+//! second time for the configuration file. Both paths now go through
+//! [`proxy_bootstrap::config::merge`], so "a flag beats the file" is a property of
+//! one function rather than of two that could drift.
 //!
-//! The one translation that matters is the controller: a value containing a `/`
-//! is a socket path, anything else is host:port. Guessing the other way — treating
-//! a bare word as a path — would put a socket file in the working directory.
+//! What is left here is the translation from *argv* to merge *inputs*: deciding
+//! which arguments were actually supplied. An absent flag must stay absent rather
+//! than becoming its default, because the merge has to be able to tell "the
+//! operator typed the default" from "nobody set this" — that distinction is what
+//! `--print-config` reports.
 
 use std::path::PathBuf;
 
-use proxy_bootstrap::{ControllerEndpoint, DataPaths, RuntimeConfig};
-use proxy_domain::shared::id::MihomoInstanceId;
+use proxy_bootstrap::RuntimeConfig;
+use proxy_bootstrap::config::file;
+use proxy_bootstrap::config::merge::{self, Inputs};
 
 use crate::args::AgentRunArgs;
 
-/// The default controller socket, matching the documented layout.
-pub const DEFAULT_CONTROLLER: &str = "/run/proxy-agent/mihomo.sock";
+/// The outcome of preparing a configuration, or a request to print and exit.
+#[derive(Debug)]
+pub enum Prepared {
+    /// Serve with this configuration.
+    Serve(Box<RuntimeConfig>),
+    /// Print this report and exit successfully.
+    Print(String),
+}
 
-/// Builds a configuration from `agent run`'s flags.
+/// Prepares the configuration for `agent run`.
 ///
 /// # Errors
 ///
-/// Returns a message when the instance name is not a valid identifier, or the
-/// root or controller cannot be interpreted. The caller turns that into a usage
-/// error, because that is what it is: the operator passed something unusable.
-pub fn config_for(args: &AgentRunArgs) -> Result<RuntimeConfig, String> {
-    let instance = MihomoInstanceId::parse(&args.instance)
-        .map_err(|e| format!("invalid instance name {:?}: {e}", args.instance))?;
+/// Returns a message when the file cannot be used — unreadable, too permissive,
+/// malformed, or holding a value that cannot be composed — or when an argument is
+/// unusable. The caller turns that into a startup failure; none of these is
+/// recoverable by guessing.
+pub fn prepare(args: &AgentRunArgs) -> Result<Prepared, String> {
+    let path = file::resolve_path(args.config.as_deref());
+    let loaded = file::load(&path).map_err(|e| e.to_string())?;
+    let was_loaded = loaded.is_some();
 
-    let mut config = match &args.root {
-        Some(root) => RuntimeConfig::rooted_at(instance, root.display().to_string()),
-        None => RuntimeConfig::local(instance),
+    let mut inputs = Inputs {
+        file: loaded,
+        ..Inputs::default()
     };
 
-    config.controller = match &args.controller {
-        Some(value) => parse_controller(value)?,
-        None => match &args.root {
-            // `rooted_at` already placed the socket under the root, and it must
-            // stay there: pointing a development run at `/run` would either fail
-            // or, worse, collide with a real agent's socket.
-            None => ControllerEndpoint::UnixSocket(DEFAULT_CONTROLLER.to_owned()),
-            Some(_) => config.controller,
-        },
+    // Only what was actually supplied. An absent flag stays `None` so the merge
+    // can fall through to the file, and so the report can say which source won.
+    inputs.instance = args.instance.clone();
+    inputs.root = args.root.as_ref().map(|p| p.display().to_string());
+    inputs.controller = args.controller.clone();
+    inputs.kernel_binary = args.kernel_binary.clone();
+    // An empty list means "the flag was not given": clap cannot express `--allow`
+    // with no value, so it rejects that as a usage error before reaching here and
+    // emptiness is unambiguous.
+    inputs.subscription_allow = if args.allow.is_empty() {
+        None
+    } else {
+        Some(args.allow.clone())
+    };
+    // Only an explicit affirmative is forwarded. Forwarding `false` would let an
+    // absent flag override a `true` in the file, and the failure mode of getting
+    // this backwards is silently disabling a probe the operator asked for.
+    inputs.allow_write_probes = if args.allow_write_probes {
+        Some(true)
+    } else {
+        None
     };
 
-    if let Some(binary) = &args.kernel_binary {
-        config.kernel_binary = binary.clone();
-    }
-    config.subscription_allow = args.allow.clone();
-    config.allow_write_probes = args.allow_write_probes;
+    let resolved = merge::merge(&inputs).map_err(|e| e.to_string())?;
 
-    // A root without an explicit controller keeps `rooted_at`'s socket, but the
-    // socket path must also be rooted — `rooted_at` sets it, `local` does not.
-    if args.root.is_some() && args.controller.is_none() {
-        let root = args
-            .root
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let root = root.trim_end_matches('/');
-        config.socket_path = Some(format!("{root}/run/agent.sock"));
+    if args.print_config {
+        return Ok(Prepared::Print(resolved.report(&path, was_loaded)));
     }
 
-    Ok(config)
+    // A warning is printed rather than swallowed, because it names a conflict the
+    // operator cannot otherwise see: a file-provided secret overriding a stored
+    // one produces no error, only a difference from what they expect.
+    if let Some(warning) = &resolved.warning {
+        eprintln!("proxyctl: warning: {warning}");
+    }
+
+    Ok(Prepared::Serve(Box::new(resolved.config)))
 }
 
-/// Interprets a controller value.
-///
-/// # Errors
-///
-/// Returns a message when the value is empty.
-pub fn parse_controller(value: &str) -> Result<ControllerEndpoint, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("the controller endpoint must not be empty".to_owned());
-    }
-    if value.contains('/') {
-        return Ok(ControllerEndpoint::UnixSocket(value.to_owned()));
-    }
-    // `host:port` with no port is almost certainly a mistake, but the endpoint
-    // type carries it and the connection attempt reports it with the address,
-    // which is more useful than a guess here.
-    Ok(ControllerEndpoint::Loopback {
-        address: value.to_owned(),
-    })
-}
-
-/// The conventional data paths, exposed so a caller can report them.
+/// The configuration file a run would read.
 #[must_use]
-pub fn standard_paths() -> DataPaths {
-    DataPaths::standard()
-}
-
-/// A convenience for tests and callers that want a rooted config directly.
-#[must_use]
-pub fn rooted(instance: &str, root: &std::path::Path) -> Option<RuntimeConfig> {
-    let Ok(instance) = MihomoInstanceId::parse(instance) else {
-        return None;
-    };
-    Some(RuntimeConfig::rooted_at(
-        instance,
-        root.display().to_string(),
-    ))
-}
-
-/// The root as a path, when one was given.
-#[must_use]
-pub fn root_of(args: &AgentRunArgs) -> Option<PathBuf> {
-    args.root.clone()
+pub fn config_path(args: &AgentRunArgs) -> PathBuf {
+    file::resolve_path(args.config.as_deref())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proxy_bootstrap::ControllerEndpoint;
 
     fn args() -> AgentRunArgs {
         AgentRunArgs {
-            instance: "default".to_owned(),
+            config: None,
+            print_config: false,
+            instance: None,
             root: None,
             controller: None,
             kernel_binary: None,
@@ -129,106 +112,239 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_bare_controller_value_is_host_and_port() {
-        assert_eq!(
-            parse_controller("127.0.0.1:9090").expect("ok"),
-            ControllerEndpoint::Loopback {
-                address: "127.0.0.1:9090".to_owned()
-            }
-        );
-    }
-
-    /// A path is a socket. This is the case that would otherwise create a file
-    /// named after a host in the working directory.
-    #[test]
-    fn a_controller_value_with_a_slash_is_a_socket_path() {
-        assert_eq!(
-            parse_controller("/run/proxy-agent/mihomo.sock").expect("ok"),
-            ControllerEndpoint::UnixSocket("/run/proxy-agent/mihomo.sock".to_owned())
-        );
+    fn serve(args: &AgentRunArgs) -> RuntimeConfig {
+        match prepare(args).expect("prepare must succeed") {
+            Prepared::Serve(config) => *config,
+            Prepared::Print(_) => panic!("expected a configuration, not a report"),
+        }
     }
 
     #[test]
-    fn an_empty_controller_is_refused() {
-        assert!(parse_controller("").is_err());
-        assert!(parse_controller("   ").is_err());
+    fn with_no_flags_and_no_file_everything_defaults() {
+        let config = serve(&args());
+        assert_eq!(config.instance.as_str(), "default");
+        assert_eq!(config.paths.configs_dir, "/var/lib/proxy-agent/configs");
+        assert_eq!(config.agent_socket_path(), "/run/proxy-agent/agent.sock");
     }
 
+    /// A root still moves every path, including both sockets.
     #[test]
-    fn an_invalid_instance_name_is_refused() {
-        let mut args = args();
-        args.instance = String::new();
-        assert!(config_for(&args).is_err());
-    }
-
-    /// The system default keeps every path conventional; a root moves all of them
-    /// together, which is the property that makes a development run safe.
-    #[test]
-    fn a_root_moves_the_socket_under_itself() {
+    fn a_root_moves_every_path() {
         let mut args = args();
         args.root = Some(PathBuf::from("/tmp/proxyctl-dev"));
-        let config = config_for(&args).expect("ok");
+        let config = serve(&args);
+        assert_eq!(config.paths.configs_dir, "/tmp/proxyctl-dev/lib/configs");
         assert_eq!(
             config.agent_socket_path(),
             "/tmp/proxyctl-dev/run/agent.sock"
         );
-        assert_eq!(config.paths.configs_dir, "/tmp/proxyctl-dev/lib/configs");
         assert_eq!(
             config.controller,
             ControllerEndpoint::UnixSocket("/tmp/proxyctl-dev/run/mihomo.sock".to_owned())
         );
     }
 
+    /// A flag must beat the file. This is the precedence rule the module exists to
+    /// make true, so it is asserted through the real entry point.
     #[test]
-    fn without_a_root_the_paths_are_conventional() {
-        let config = config_for(&args()).expect("ok");
-        assert_eq!(config.agent_socket_path(), "/run/proxy-agent/agent.sock");
-        assert_eq!(
-            config.controller,
-            ControllerEndpoint::UnixSocket(DEFAULT_CONTROLLER.to_owned())
-        );
+    fn a_flag_beats_the_file() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[agent]\ninstance = \"from-file\"\n").expect("write");
+        set_private(&path);
+
+        let mut args = args();
+        args.config = Some(path);
+        args.instance = Some("from-flag".to_owned());
+        assert_eq!(serve(&args).instance.as_str(), "from-flag");
+
+        // And with no flag, the file wins over the default.
+        args.instance = None;
+        assert_eq!(serve(&args).instance.as_str(), "from-file");
     }
 
-    /// An explicit controller overrides the derived one, in both directions.
+    /// `--print-config` reports provenance and never serves.
     #[test]
-    fn an_explicit_controller_wins() {
+    fn print_config_reports_and_returns_a_report() {
         let mut args = args();
-        args.root = Some(PathBuf::from("/tmp/x"));
-        args.controller = Some("127.0.0.1:9090".to_owned());
-        let config = config_for(&args).expect("ok");
+        args.print_config = true;
+        args.root = Some(PathBuf::from("/tmp/dev"));
+        match prepare(&args).expect("prepare") {
+            Prepared::Print(report) => {
+                assert!(report.contains("[argument]"), "{report}");
+                assert!(report.contains("/tmp/dev/lib/configs"), "{report}");
+            }
+            Prepared::Serve(_) => panic!("--print-config must not serve"),
+        }
+    }
+
+    /// The report says when no file was found, because the operator's first
+    /// question on a failed start is "which file did it read".
+    #[test]
+    fn the_report_names_the_file_and_whether_it_was_found() {
+        let mut args = args();
+        args.print_config = true;
+        args.config = Some(PathBuf::from("/tmp/definitely-not-here.toml"));
+        match prepare(&args).expect("prepare") {
+            Prepared::Print(report) => {
+                assert!(report.contains("/tmp/definitely-not-here.toml"), "{report}");
+                assert!(report.contains("not found"), "{report}");
+            }
+            Prepared::Serve(_) => panic!("expected a report"),
+        }
+    }
+
+    /// A malformed file fails the start rather than being ignored.
+    #[test]
+    fn a_malformed_file_is_refused() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[agent\ninstance = 1\n").expect("write");
+        set_private(&path);
+
+        let mut args = args();
+        args.config = Some(path);
+        let error = prepare(&args).expect_err("must fail");
+        assert!(error.contains("invalid configuration"), "{error}");
+    }
+
+    /// A file with any group or other bit set is refused, because it may hold the
+    /// kernel secret.
+    #[test]
+    fn a_permissive_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o644, 0o640, 0o666, 0o604, 0o770] {
+            let dir = tempfile::tempdir().expect("dir");
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, "[agent]\ninstance = \"x\"\n").expect("write");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+
+            let mut args = args();
+            args.config = Some(path);
+            let error = prepare(&args).expect_err("a group/other-accessible file must be refused");
+            assert!(error.contains("0600"), "mode {mode:o}: {error}");
+        }
+    }
+
+    /// Owner-only is accepted even when read-only: a read-only configuration is a
+    /// legitimate deployment, not a broken one.
+    #[test]
+    fn an_owner_only_file_is_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o600, 0o400] {
+            let dir = tempfile::tempdir().expect("dir");
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, "[kernel]\nbinary = \"/x/mihomo\"\n").expect("write");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+
+            let mut args = args();
+            args.config = Some(path);
+            assert_eq!(serve(&args).kernel_binary, "/x/mihomo", "mode {mode:o}");
+        }
+    }
+
+    /// A file-provided secret reaches the configuration, and the loopback
+    /// controller it enables survives composition.
+    #[test]
+    fn a_file_secret_reaches_the_configuration() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[controller]\nendpoint = \"127.0.0.1:9090\"\n\n[kernel]\nsecret = \"hunter2\"\n",
+        )
+        .expect("write");
+        set_private(&path);
+
+        let mut args = args();
+        args.config = Some(path);
+        let config = serve(&args);
+        assert_eq!(config.mihomo_secret.as_deref(), Some("hunter2"));
         assert_eq!(
             config.controller,
             ControllerEndpoint::Loopback {
                 address: "127.0.0.1:9090".to_owned()
             }
         );
-        // The agent socket still follows the root: the two are different sockets.
-        assert_eq!(config.agent_socket_path(), "/tmp/x/run/agent.sock");
     }
 
+    /// An empty secret is refused through the real entry point too, since this is
+    /// the path an operator actually takes.
+    #[test]
+    fn an_empty_secret_is_refused() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[kernel]\nsecret = \"\"\n").expect("write");
+        set_private(&path);
+
+        let mut args = args();
+        args.config = Some(path);
+        let error = prepare(&args).expect_err("must be refused");
+        assert!(error.contains("empty"), "{error}");
+    }
+
+    /// Flags reach the composed configuration.
     #[test]
     fn flags_reach_the_configuration() {
         let mut args = args();
         args.kernel_binary = Some("/opt/mihomo".to_owned());
         args.allow = vec!["10.0.0.0/8".to_owned()];
         args.allow_write_probes = true;
-        let config = config_for(&args).expect("ok");
+        let config = serve(&args);
         assert_eq!(config.kernel_binary, "/opt/mihomo");
         assert_eq!(config.subscription_allow, vec!["10.0.0.0/8".to_owned()]);
         assert!(config.allow_write_probes);
     }
 
-    /// Write probes mutate host state, so the default must be off.
+    /// Write probes mutate host state and must stay off unless asked for.
     #[test]
     fn write_probes_default_to_off() {
-        assert!(!config_for(&args()).expect("ok").allow_write_probes);
+        assert!(!serve(&args()).allow_write_probes);
+    }
+
+    /// A file enabling write probes must survive an absent flag: forwarding the
+    /// flag's `false` would silently disable what the operator configured.
+    #[test]
+    fn an_absent_probe_flag_does_not_disable_the_file_setting() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[security]\nallow_write_probes = true\n").expect("write");
+        set_private(&path);
+
+        let mut args = args();
+        args.config = Some(path);
+        assert!(
+            serve(&args).allow_write_probes,
+            "the file asked for write probes and no flag contradicted it"
+        );
+    }
+
+    /// A relative `--controller` is refused, because it would otherwise be read as
+    /// a host name and fail much later as a connection error.
+    #[test]
+    fn a_relative_controller_flag_is_refused() {
+        for value in ["./mihomo.sock", "mihomo.sock"] {
+            let mut args = args();
+            args.controller = Some(value.to_owned());
+            let error = prepare(&args).expect_err("must be refused");
+            assert!(
+                error.contains("absolute") || error.contains("host:port"),
+                "{value}: {error}"
+            );
+        }
     }
 
     #[test]
-    fn a_rooted_config_can_be_built_directly() {
-        let config = rooted("default", std::path::Path::new("/tmp/y")).expect("ok");
-        assert_eq!(config.agent_socket_path(), "/tmp/y/run/agent.sock");
-        assert!(rooted("", std::path::Path::new("/tmp/y")).is_none());
+    fn the_config_path_follows_the_flag_then_the_default() {
+        let mut args = args();
+        assert_eq!(config_path(&args), PathBuf::from(file::DEFAULT_CONFIG_PATH));
+        args.config = Some(PathBuf::from("/tmp/explicit.toml"));
+        assert_eq!(config_path(&args), PathBuf::from("/tmp/explicit.toml"));
+    }
+
+    /// Sets the owner-only mode the loader requires.
+    fn set_private(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
     }
 }

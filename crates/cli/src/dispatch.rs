@@ -33,12 +33,21 @@ pub async fn run(cli: Cli) -> Exit {
         action: AgentAction::Run(args),
     }) = &cli.command
     {
-        return match runtime::config_for(args) {
-            Ok(config) => match agent::run(config).await {
+        return match runtime::prepare(args) {
+            // `--print-config` is a diagnosis, not a failure: it reports and exits
+            // zero, so packaging can use it as a self-check.
+            Ok(runtime::Prepared::Print(report)) => {
+                println!("{report}");
+                Exit::Success
+            }
+            Ok(runtime::Prepared::Serve(config)) => match agent::run(*config).await {
                 Ok(()) => Exit::Success,
                 Err(code) => code,
             },
             Err(e) => {
+                // A configuration the operator supplied that cannot be used is a
+                // usage failure rather than a runtime one: the process never
+                // started, and the fix is to change the input.
                 eprintln!("proxyctl: {e}");
                 Exit::Usage
             }
@@ -263,6 +272,9 @@ mod tests {
             "/tmp/definitely-not-a-socket",
             "agent",
             "run",
+            // A root is mandatory here: without one the daemon composes against
+            // `/var/lib/proxy-agent` and `/usr/lib/proxy-agent`, which a test has
+            // no business touching. Discovering that took a failing run.
             "--root",
             dir.path().to_str().expect("utf8"),
         ])
@@ -278,10 +290,48 @@ mod tests {
         );
 
         // And the socket it bound is the one under the root, not the default.
-        let socket = dir.path().join("run/agent.sock");
         assert!(
-            socket.exists() || !socket.exists(),
-            "the socket path is under the root by construction"
+            dir.path().join("run/agent.sock").exists(),
+            "the daemon must bind the socket under the root it was given"
         );
+    }
+
+    /// `--print-config` is a diagnosis and must succeed without a daemon, a
+    /// socket, or a writable root. This is what makes it usable from packaging.
+    #[tokio::test]
+    async fn print_config_exits_zero_without_touching_anything() {
+        let cli = Cli::try_parse_from([
+            "proxyctl",
+            "--socket",
+            "/tmp/definitely-not-a-socket",
+            "agent",
+            "run",
+            "--print-config",
+        ])
+        .expect("parse");
+        assert_eq!(run(cli).await, Exit::Success);
+    }
+
+    /// A configuration file that cannot be used is a usage failure: the process
+    /// never started, so the fix is to change the input rather than to retry.
+    #[tokio::test]
+    async fn an_unusable_config_file_is_a_usage_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[agent\ninstance = 1\n").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let cli = Cli::try_parse_from([
+            "proxyctl",
+            "agent",
+            "run",
+            "--config",
+            path.to_str().expect("utf8"),
+            "--root",
+            dir.path().to_str().expect("utf8"),
+        ])
+        .expect("parse");
+        assert_eq!(run(cli).await, Exit::Usage);
     }
 }
