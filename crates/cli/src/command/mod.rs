@@ -932,6 +932,77 @@ impl Logs {
     }
 }
 
+/// Formats one streamed event for a terminal.
+///
+/// The server sends `{"seq":N,"kind":"...","at":...,"data":{...}}`. The rendering
+/// turns the interesting part of `data` into a short suffix, so a person watching
+/// the stream sees `config.activated v002` rather than a nested object.
+///
+/// A `lagged` event is called out explicitly. It means the agent dropped events
+/// because this client could not keep up — the one case where the reader must act
+/// rather than just read, so it must not look like an ordinary line.
+pub fn format_event_line(line: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        // An unfamiliar shape is still output the caller asked for.
+        return line.to_owned();
+    };
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("event");
+    let seq = value.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    if kind == "lagged" {
+        let missed = value
+            .get("data")
+            .and_then(|d| d.get("missed"))
+            .and_then(|m| m.as_u64())
+            .unwrap_or(0);
+        return format!(
+            "{seq:>6}  LAGGED   {missed} event(s) dropped; re-read state for a current view"
+        );
+    }
+
+    let detail = describe_event(kind, value.get("data"));
+    if detail.is_empty() {
+        format!("{seq:>6}  {kind}")
+    } else {
+        format!("{seq:>6}  {kind}  {detail}")
+    }
+}
+
+/// The one-line summary of an event's payload.
+fn describe_event(kind: &str, data: Option<&serde_json::Value>) -> String {
+    let Some(data) = data else {
+        return String::new();
+    };
+    let field = |name: &str| data.get(name).and_then(|v| v.as_str()).unwrap_or("");
+
+    match kind {
+        "config.activated" | "config.rolled-back" => {
+            let version = field("version");
+            let instance = field("instance");
+            if instance.is_empty() {
+                version.to_owned()
+            } else {
+                format!("{instance} {version}")
+            }
+        }
+        "subscription.updated" => {
+            let id = field("subscription");
+            let ok = data
+                .get("succeeded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            format!("{id} {}", if ok { "succeeded" } else { "failed" })
+        }
+        "job.progress" => format!("{} {}", field("job"), field("step")),
+        "job.finished" => format!("{} {}", field("job"), field("state")),
+        "mihomo.log" => format!("{:<7} {}", field("level"), field("message")),
+        _ => String::new(),
+    }
+}
+
 /// Formats one streamed line for a terminal.
 ///
 /// The server sends `{"level":"...","message":"..."}`. Printing the whole object
@@ -1491,6 +1562,64 @@ mod tests {
         .expect("render");
         assert!(text.contains("accepted"), "{text}");
         assert!(text.contains("audit record could not be written"), "{text}");
+    }
+
+    #[test]
+    fn a_config_event_renders_its_version() {
+        let text = format_event_line(
+            r#"{"seq":1,"kind":"config.activated","at":1,"data":{"instance":"default","version":"v002"}}"#,
+        );
+        assert!(text.contains("config.activated"), "{text}");
+        assert!(text.contains("default v002"), "{text}");
+    }
+
+    #[test]
+    fn a_subscription_event_renders_its_outcome() {
+        let ok = format_event_line(
+            r#"{"seq":2,"kind":"subscription.updated","at":1,"data":{"subscription":"sub_1","succeeded":true}}"#,
+        );
+        assert!(ok.contains("sub_1 succeeded"), "{ok}");
+
+        let failed = format_event_line(
+            r#"{"seq":3,"kind":"subscription.updated","at":1,"data":{"subscription":"sub_1","succeeded":false}}"#,
+        );
+        assert!(failed.contains("sub_1 failed"), "{failed}");
+    }
+
+    #[test]
+    fn a_job_event_renders_its_step() {
+        let text = format_event_line(
+            r#"{"seq":4,"kind":"job.progress","at":1,"data":{"job":"job_1","step":"reload"}}"#,
+        );
+        assert!(text.contains("job_1 reload"), "{text}");
+    }
+
+    /// A lag notice is the one line a reader must act on, so it must not look like
+    /// an ordinary event.
+    #[test]
+    fn a_lag_notice_is_called_out() {
+        let text = format_event_line(r#"{"seq":9,"kind":"lagged","at":1,"data":{"missed":7}}"#);
+        assert!(text.contains("LAGGED"), "{text}");
+        assert!(text.contains('7'), "{text}");
+        assert!(text.contains("re-read"), "it must say what to do: {text}");
+    }
+
+    /// A heartbeat is expected noise and must render as such rather than as
+    /// something needing attention.
+    #[test]
+    fn a_heartbeat_renders_plainly() {
+        let text = format_event_line(r#"{"seq":5,"kind":"heartbeat","at":1,"data":{}}"#);
+        assert!(text.contains("heartbeat"), "{text}");
+        assert!(!text.contains("LAGGED"), "{text}");
+    }
+
+    /// An unfamiliar shape is printed rather than dropped: the caller asked for
+    /// output, and a line whose shape is new is still output.
+    #[test]
+    fn an_unfamiliar_event_line_is_printed_as_it_arrived() {
+        assert_eq!(format_event_line("not json"), "not json");
+        let unknown = format_event_line(r#"{"seq":1,"kind":"something.new","at":1,"data":{}}"#);
+        assert!(unknown.contains("something.new"), "{unknown}");
     }
 
     #[test]

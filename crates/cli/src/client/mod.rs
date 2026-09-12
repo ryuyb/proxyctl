@@ -24,11 +24,17 @@ use crate::exit::Exit;
 /// application's own 30-second readiness timeout.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a stream may take to *open*.
+/// How long establishing a stream may take.
 ///
-/// Short: opening a stream is a local socket write, and the agent answers as soon
-/// as it has attached to the kernel. This bounds the connection attempt, not the
-/// stream's lifetime — once lines are arriving, the caller decides when to stop.
+/// Applied with `connect_timeout`, not `timeout`, and the difference is the whole
+/// point: `reqwest`'s `timeout` bounds the **entire exchange including the body**,
+/// so using it here cut a working stream off after ten seconds. A follow of the
+/// event stream that stops after ten seconds looks like the agent hung up, and the
+/// only reason it was caught is that `--once` waits for an event rather than
+/// printing what already arrived.
+///
+/// Once the connection is established the stream is unbounded: the caller decides
+/// when to stop, and a quiet stream is normal rather than a failure.
 pub const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where the agent listens, when the environment does not say otherwise.
@@ -178,10 +184,10 @@ impl Client {
     pub async fn stream(&self, path: &str) -> Result<LineStream, ClientError> {
         let http = reqwest::Client::builder()
             .unix_socket(self.socket.clone())
-            // Bounded only until the response head arrives. `reqwest` applies this
-            // to the whole exchange, so it is stated once here and the caller
-            // stops reading when it wants to stop.
-            .timeout(STREAM_OPEN_TIMEOUT)
+            // Only the connection attempt is bounded. A total timeout would kill
+            // the body, which for this endpoint is the entire point of the
+            // request.
+            .connect_timeout(STREAM_OPEN_TIMEOUT)
             .build()
             .map_err(|e| ClientError::Transport(e.to_string()))?;
 
@@ -419,6 +425,24 @@ mod tests {
     fn a_client_can_be_built_for_a_socket_that_does_not_exist() {
         let client = Client::new("/tmp/definitely-not-a-socket").expect("build");
         assert_eq!(client.socket(), Path::new("/tmp/definitely-not-a-socket"));
+    }
+
+    /// A stream must outlive the connect timeout.
+    ///
+    /// The first version applied `reqwest`'s `timeout`, which bounds the whole
+    /// exchange including the body — so a working stream stopped after ten
+    /// seconds. Asserting the constant's role is weaker than asserting the
+    /// behaviour, but the behaviour needs a real server; what this pins is that the
+    /// value is used for the connection only.
+    #[test]
+    fn the_stream_timeout_is_for_connecting_not_for_the_body() {
+        // The value is documented as a *connect* bound. A total-timeout
+        // interpretation would make it a stream lifetime, which is what broke.
+        assert_eq!(STREAM_OPEN_TIMEOUT, Duration::from_secs(10));
+        assert!(
+            STREAM_OPEN_TIMEOUT < REQUEST_TIMEOUT,
+            "a connect bound should be shorter than a whole-request bound"
+        );
     }
 
     #[tokio::test]

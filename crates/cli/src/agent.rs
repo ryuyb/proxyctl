@@ -40,12 +40,47 @@ pub async fn run(config: RuntimeConfig) -> Result<(), Exit> {
     // still says which path was attempted.
     let socket = config.agent_socket_path();
 
-    let context = Bootstrap::build_real(&config)
+    let (context, events) = Bootstrap::build_real_with_events(&config)
         .await
         .map_err(|e| report("cannot compose the agent", &e.to_string()))?;
+    let context = std::sync::Arc::new(context);
 
     println!("proxy-agent listening on {socket}");
-    run_with_context(std::sync::Arc::new(context), &config).await
+
+    // The kernel-log forwarder runs only when the deployment asked for it. Its
+    // cost is real — every kernel log line is read and redacted whether or not
+    // anyone is subscribed — so it is off unless enabled in the configuration.
+    let shutdown = shutdown_channel();
+    if config.publish_mihomo_logs {
+        match proxy_bootstrap::log_forwarder::source_for(
+            &config.controller,
+            config.mihomo_secret.as_deref(),
+        ) {
+            Ok(source) => {
+                let publisher: std::sync::Arc<dyn proxy_application::ports::EventPublisher> =
+                    context.events.clone();
+                tokio::spawn(proxy_bootstrap::log_forwarder::run(
+                    source,
+                    publisher,
+                    shutdown.1.clone(),
+                ));
+                println!("kernel logs are being published as events");
+            }
+            Err(reason) => {
+                // Not fatal: the agent still serves state-change events, and a
+                // failure here would otherwise stop a working agent because an
+                // optional feature could not start.
+                eprintln!("proxyctl: kernel logs will not be published: {reason}");
+            }
+        }
+    }
+
+    run_with_context(context, &config, events, shutdown).await
+}
+
+/// A shutdown signal pair, kept alive for the daemon's lifetime.
+fn shutdown_channel() -> (watch::Sender<bool>, watch::Receiver<bool>) {
+    watch::channel(false)
 }
 
 /// Serves an already-composed context.
@@ -62,12 +97,13 @@ pub async fn run(config: RuntimeConfig) -> Result<(), Exit> {
 pub async fn run_with_context(
     context: std::sync::Arc<proxy_application::AppContext>,
     config: &RuntimeConfig,
+    events: Option<std::sync::Arc<dyn proxy_interfaces::http::state::EventSource>>,
+    shutdown_channel: (watch::Sender<bool>, watch::Receiver<bool>),
 ) -> Result<(), Exit> {
-    let server = proxy_bootstrap::build_http_server(context, config)
+    let server = proxy_bootstrap::build_http_server(context, config, events)
         .map_err(|e| report("cannot build the listener", &e.to_string()))?;
 
-    let (shutdown_tx, shutdown_rx): (watch::Sender<bool>, watch::Receiver<bool>) =
-        watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = shutdown_channel;
 
     let signal = tokio::spawn(async move {
         // `ctrl_c` covers SIGINT and, on Unix, is a documented wrapper; SIGTERM is

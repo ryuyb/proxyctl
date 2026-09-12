@@ -5,8 +5,8 @@
 //! easier to assert here than through a process boundary.
 
 use crate::args::{
-    AgentAction, AgentArgs, Cli, ConfigCommand, ConnectionsCommand, LogsArgs, MihomoCommand,
-    SubscriptionCommand, TopCommand,
+    AgentAction, AgentArgs, Cli, ConfigCommand, ConnectionsCommand, EventsArgs, LogsArgs,
+    MihomoCommand, SubscriptionCommand, TopCommand,
 };
 use crate::command::{self, Command, Format};
 use crate::exit::Exit;
@@ -60,6 +60,13 @@ pub async fn run(cli: Cli) -> Exit {
     // trait that every other command implements.
     if let TopCommand::Logs(args) = &cli.command {
         return stream_logs(&cli.socket, args, format).await;
+    }
+
+    // The event stream is followed the same way the log stream is: it has no
+    // single response to render, so it is driven here rather than modelled as a
+    // `Command`.
+    if let TopCommand::Events(args) = &cli.command {
+        return stream_events(&cli.socket, args, format).await;
     }
 
     // `connections close --all` needs an acknowledgement before anything is sent.
@@ -212,6 +219,68 @@ async fn stream_logs(socket: &Option<std::path::PathBuf>, args: &LogsArgs, forma
     }
 }
 
+/// Follows the agent's event stream.
+///
+/// # Why `--once` exists
+///
+/// Without it the command runs until interrupted, which is what "follow" means.
+/// `--once` makes it a connectivity check: a caller that wants to block until
+/// something happens — a script waiting for a configuration to activate — gets
+/// exactly one event and an exit code that says whether one arrived.
+async fn stream_events(
+    socket: &Option<std::path::PathBuf>,
+    args: &EventsArgs,
+    format: Format,
+) -> Exit {
+    let socket = client::resolve_socket(socket.as_deref());
+    let client = match client::Client::new(socket) {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("proxyctl: {e}");
+            return e.exit_code();
+        }
+    };
+
+    // The path carries no version prefix: it is fixed by the design document, and
+    // the version is in the path itself.
+    let mut stream = match client.stream("/ws/v1/events").await {
+        Ok(stream) => stream,
+        Err(e) => {
+            eprintln!("proxyctl: {e}");
+            return e.exit_code();
+        }
+    };
+
+    let as_json = format == Format::Json;
+    loop {
+        let next = tokio::select! {
+            line = stream.next_line() => line,
+            _ = tokio::signal::ctrl_c() => return Exit::Success,
+        };
+
+        match next {
+            Ok(Some(line)) => {
+                if as_json {
+                    println!("{line}");
+                } else {
+                    println!("{}", command::format_event_line(&line));
+                }
+                if args.once {
+                    return Exit::Success;
+                }
+            }
+            Ok(None) => {
+                // The body ended: the agent went away or shut down.
+                return Exit::DependencyUnreachable;
+            }
+            Err(e) => {
+                eprintln!("proxyctl: {e}");
+                return e.exit_code();
+            }
+        }
+    }
+}
+
 /// Builds the command for a parsed subcommand.
 ///
 /// Returns [`None`] only for a command with no request behind it.
@@ -270,7 +339,7 @@ pub fn build(top: &TopCommand) -> Option<Box<dyn Command>> {
         TopCommand::Connections(ConnectionsCommand::Close(args)) => Box::new(CloseConnections {
             id: args.id.clone(),
         }),
-        TopCommand::Logs(_) | TopCommand::Agent(_) => return None,
+        TopCommand::Logs(_) | TopCommand::Events(_) | TopCommand::Agent(_) => return None,
     };
     Some(command)
 }

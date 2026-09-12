@@ -85,6 +85,9 @@ pub enum TopCommand {
     /// Inspect and close the kernel's connections.
     #[command(subcommand)]
     Connections(ConnectionsCommand),
+
+    /// Follow the agent's event stream.
+    Events(EventsArgs),
 }
 
 /// The `agent` subcommand.
@@ -242,6 +245,17 @@ pub struct AuditArgs {
     /// How many records to request.
     #[arg(long, default_value_t = 50)]
     pub limit: u32,
+}
+
+/// The `events` arguments.
+#[derive(Debug, Args)]
+pub struct EventsArgs {
+    /// Stop at the first event instead of waiting for the next one.
+    ///
+    /// Useful as a connectivity check, and for a script that wants to block until
+    /// something happens.
+    #[arg(long)]
+    pub once: bool,
 }
 
 /// The `connections` subcommands.
