@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/sys",
     "crates/domain",
     "crates/application",
     "crates/infrastructure",
@@ -29,6 +30,12 @@ nix = { version = "0.30", default-features = false }
 # Metadata storage. `bundled` compiles SQLite in rather than linking a system
 # library, so the agent does not depend on the distribution's sqlite version.
 rusqlite = { version = "0.40", default-features = false }
+# Level 2 validation needs to inspect the document's keys. `mihomo -t` cannot do
+# this: it accepts unknown fields, so a mistyped key passes and the kernel falls
+# back to a default. `serde_yaml` is marked deprecated upstream but remains the
+# maintained-by-the-same-author, working implementation; its successor is not yet
+# stable. Revisit when it is.
+serde_yaml = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

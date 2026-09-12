@@ -1,0 +1,32 @@
+[package]
+name = "proxy-sys"
+description = "Thin safe wrappers over Linux system calls that require unsafe code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "proxy_sys"
+path = "src/lib.rs"
+
+# This is the only crate in the workspace permitted to contain unsafe code, and
+# only for the syscalls that have no safe wrapper in a maintained crate. Keeping
+# it separate means the rest of the codebase can keep `forbid(unsafe_code)`,
+# rather than downgrading that to `deny` somewhere and leaving a door open.
+[dependencies]
+libc = "0.2"
+
+# The workspace forbids unsafe code; this crate exists precisely to contain the
+# small amount that no safe wrapper covers. The `forbid` is lifted here and only
+# here, and `deny(unsafe_op_in_unsafe_fn)` in the crate root keeps every inner
+# operation explicit.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+todo = "deny"
+unimplemented = "deny"

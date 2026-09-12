@@ -36,6 +36,9 @@ rusqlite = { workspace = true, features = ["bundled"] }
 # Atomic file replacement for configuration bodies: same-directory temp file
 # plus rename is the only way the target is ever seen fully-old or fully-new.
 tempfile.workspace = true
+serde_yaml.workspace = true
+# The one wrapper crate containing unsafe code; see its crate docs.
+proxy-sys = { path = "../sys" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
