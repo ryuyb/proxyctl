@@ -102,12 +102,29 @@
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | **`OPEN`（已明确责任与清单）** |
+| 状态 | **`PARTIAL`（2026-09-12 已大幅收口）** |
 | 背景 | 宿主为 macOS：无法实测真实 systemd PID 1、PVE LXC、nftables/iptables 写操作。Docker Hub 与镜像源不可达（仅本地缓存镜像可用），容器证据为 `[实测-容器]` 级。 |
 | 已补齐的部分 | TUN/CAP/TPROXY/nftables/iptables 在容器内取得了实测（R10、R11）；Sub-Store 用 Node 直跑取得实测（R04、R05）。 |
 | 未覆盖 | 真实 systemd 下的 unit 行为、PVE 真机 capability 边界、unprivileged LXC 的 `/proc/sys` 可写性、ambient capabilities 在容器内是否可用、真实流量语义。 |
 | 验证方法 | 执行 R09 §13 与 R10 §9（P1–P30）的补测清单；在 Debian 13 / Ubuntu 24.04 上跑 `systemd-analyze verify/security`。 |
 | 关联 | REQ-LXC-001~007、REQ-NET-007、Q004 |
+
+> **2026-09-12 更新**：接入一台真实的 Debian forky（**systemd 261，PID 1 = systemd，内核 7.0.14 aarch64**）
+> 后，原先"无法实测"的项目已补齐以下部分（全部 `[实测]`，详见 R09 §4.2.1 / §4.2.2）：
+>
+> | 原未验证项 | 现状 |
+> |---|---|
+> | TUN 的 `/dev/net/tun` 存在 + `open()` + `ioctl(TUNSETIFF)` 三段判定 | ✅ 已验证：设备在、`open` 成功、无 `CAP_NET_ADMIN` 时 `TUNSETIFF` 返回 `EPERM` |
+> | `CAP_NET_ADMIN` 是必要且充分条件 | ✅ 已验证：只给 `CAP_NET_ADMIN` → `TUNSETIFF` 成功；只给 `CAP_SYS_ADMIN` → 仍 `EPERM` |
+> | domain 的 `evaluate_tun` 判定规则 | ✅ 已用真实观测值驱动，输出 `Misconfigured` / `Supported` / `Unavailable` 全部符合预期 |
+> | mihomo unix socket `chmod 0666` + 不校验 secret | ✅ Linux 上复现（三种 header 均 200） |
+> | ADR-005 的 `chmod 0660` 缓解措施 | ✅ 已验证可行，且不影响 API 可用性；预建 0750 目录不被覆盖 |
+> | `AmbientCapabilities=` 生效 | ✅ 已验证（`CapAmb=0x1000`） |
+> | **`NoNewPrivileges=` / `PrivateDevices=` 生效** | ❌ **静默失效**（LXC 环境）→ 已回写 ADR-005 D7b |
+> | 容器检测方式 | ✅ 新增确定性方法：`/run/systemd/container`（比 `/proc/1/cgroup` 可靠，后者在 cgroup v2 下为空） |
+>
+> **仍未验证**：真实 PVE LXC（非 OrbStack 的 LXC）上的 `NoNewPrivileges=` 行为、
+> privileged vs unprivileged 差异、`SO_PEERCRED` 在 tokio 下的 API。
 
 ## Q010 — sub-store-convert 的许可证与上游跟随机制是否可接受？
 

@@ -141,7 +141,7 @@ Phase 0 调研**推翻了设计文档中的若干假设**，实现前必须按�
 
 | 限制 | 影响范围 | 处理 |
 |---|---|---|
-| 宿主为 macOS，**无真实 systemd PID 1** | R09、R03、R12 的 unit 行为 | systemd 语义来自官方 man/source；落地前需在 Debian 13/Ubuntu 24.04 跑 `systemd-analyze verify/security` |
+| 宿主为 macOS，**无真实 systemd PID 1** | R09、R03、R12 的 unit 行为 | ✅ **2026-09-12 已部分收口**：接入 Debian forky（systemd 261，PID 1 = systemd）实测，验证了 `AmbientCapabilities` 生效、TUN 三段判定、mihomo socket `0666` + 不校验 secret、`chmod 0660` 缓解措施可行；并**发现 `NoNewPrivileges=`/`PrivateDevices=` 在 LXC 中静默失效**（已回写 ADR-005 D7b）。仍未验证真实 PVE LXC 的 privileged/unprivileged 差异 |
 | **无真实 PVE 主机** | R10 的 PVE 部分 | 已给 P1–P30 补测清单；需真机验证 `lxc.cgroup2.devices.allow`、`cap.drop`、`/proc/sys` 可写性、ambient cap |
 | **Docker Hub 与镜像源不可达** | 容器镜像相关结论 | 用本地缓存镜像完成 TUN/CAP/nftables 实测；镜像体积/容器内存未测 |
 | `github.com` 直连超时；GitHub API 限流耗尽 | 元数据抓取 | 改用 `raw.githubusercontent.com` + `ghfast.top` 代理；关键结论均交叉验证 |

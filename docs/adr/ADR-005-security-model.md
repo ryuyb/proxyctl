@@ -146,6 +146,27 @@ result（success|failure + 原因码）
 
 **不得写入审计**：完整配置内容、订阅原文、secret。
 
+### D7b. ⚠️ hardening 指令在 LXC 中可能静默失效（真机实测修正）
+
+在 Debian（systemd 261，`/run/systemd/container` = `lxc`）上的实测结论：
+
+| 指令 | 实测结果 |
+|---|---|
+| `AmbientCapabilities=CAP_NET_ADMIN` | ✅ 生效（子进程 `CapAmb=0x1000`） |
+| `NoNewPrivileges=yes` | ❌ **静默失效**（子进程 `NoNewPrivs=0`，`systemctl show` 报 `no`，无警告） |
+| `PrivateDevices=yes` | ❌ **静默失效**（`systemctl show` 报 `no`，`/dev/net/tun` 仍可见） |
+
+**含义（必须遵守）**：
+
+1. **不得把 `NoNewPrivileges=yes` 或 `PrivateDevices=yes` 当作已生效的安全保证**。在本项目的
+   主要目标环境 PVE LXC（同为 LXC 容器）中它们可能被静默忽略。
+2. **doctor 必须检测指令是否真正生效**，而不是读 unit 文件里写了什么。可实现的探测：
+   读 `/proc/self/status` 的 `NoNewPrivs`（期望 1）、检查 `/dev` 是否被隔离，
+   与 unit 声明的期望值比对，不符则判 `Misconfigured`。这是"检测而非假设"原则的应用。
+3. **安全边界不能只靠 unit hardening**：认证、socket 权限、secret 校验必须独立成立，
+   以便在 hardening 全部失效时仍然有效。这也是 D2/D3 不依赖 hardening 的原因。
+4. `AmbientCapabilities=` 是可靠的，因此"靠 ambient cap 传递 `CAP_NET_ADMIN`"的方案成立。
+
 ### D8. 容器/PVE 特有风险的处理
 
 - **能力判定不得用 bool**（R10 C1/C2）：`/dev/net/tun` 存在但 `TUNSETIFF` EPERM 必须表达为 `Misconfigured` 并给出修复建议，而不是 `Supported`。

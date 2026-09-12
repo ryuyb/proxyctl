@@ -304,6 +304,115 @@ ExecReload=/bin/kill -HUP $MAINPID
 | `RuntimeDirectoryMode=` | `RuntimeDirectory=` 的权限位 | 234 | 同上 |
 | `RuntimeDirectory=`/`StateDirectory=`/`CacheDirectory=`/`LogsDirectory=`/`ConfigurationDirectory=` | 启动时按表创建（system unit：`/run`、`/var/lib`、`/var/cache`、`/var/log`、`/etc`）；除 `ConfigurationDirectory=` 外**innermost 目录的 owner 设为 `User=`/`Group=`**；若已存在且 owner 不符会**递归 chown**；权限按 `*Mode=`；**隐含对应路径的 `BindPaths=`**；`RuntimeDirectory=` 停止时删除最内层目录（`RuntimeDirectoryPreserve=` 可改） | 235 | 同上 |
 
+### 4.2.1 ⚠️ 真机补测（2026-09-12，OrbStack Debian，systemd 261）
+
+R09 原先把"真正的 systemd 单元测试"列为**未做**（当时拿不到带 systemd PID1 的环境）。
+本次在一台 **Debian forky（systemd 261.2-1，PID 1 = systemd，内核 7.0.14-orbstack aarch64）** 上补齐，结论如下。
+
+**环境事实**（`[实测]`）：
+
+```text
+systemctl is-system-running   →  degraded（仅 tpm-udev.path/service 失败，与能力无关）
+systemctl show -p Virtualization →  lxc
+/proc/1/comm                  →  systemd
+/sys/fs/cgroup                →  cgroup2fs
+/proc/1/status CapEff         →  000001ffffffffff（systemd 自身全能力）
+```
+
+**1. `AmbientCapabilities=` 确实生效**（`[实测]`，与 C4/C3 一致）
+
+```text
+-p AmbientCapabilities=CAP_NET_ADMIN
+  → 子进程 CapAmb = 0000000000001000（= CAP_NET_ADMIN）
+```
+
+**2. ⚠️ `NoNewPrivileges=yes` 在本环境中静默失效**（`[实测]`，**对 C4 的重要补充**）
+
+```text
+systemd-run -p NoNewPrivileges=yes  →  子进程 NoNewPrivs = 0
+unit 文件 NoNewPrivileges=yes       →  子进程 NoNewPrivs = 0
+systemctl show -p NoNewPrivileges   →  NoNewPrivileges=no   ← 系统自己报告 no
+journal 中无任何警告                                             ← 静默忽略
+```
+
+**未失效的对照**：同一环境下 `AmbientCapabilities=` 正常生效。因此这不是"所有沙箱指令都无效"，
+而是 **`NoNewPrivileges=` 被单独忽略**。
+
+**根因（推断）**：`systemctl show -p Virtualization` 报告 `lxc`，即 systemd 检测到自己运行在
+LXC 容器中。LXC 环境下 systemd 对部分沙箱指令（依赖内核 namespace/seccomp 的）会降级，
+且**不告警**。这与 R10 的容器结论方向一致。
+
+**对设计的影响（必须回写 ADR-005）**：
+
+1. **不能把 `NoNewPrivileges=yes` 当作已生效的安全保证**。在 LXC（即本项目的主要目标环境
+   PVE LXC）中它可能被静默忽略，因此**不能依赖它来阻止 setuid 提权**。
+2. **doctor 必须实际探测 NNP 是否生效**，而不是只读 unit 文件里写了什么。可实现的探测：
+   读取 Agent 自身 `/proc/self/status` 的 `NoNewPrivs`，与 unit 中声明的期望值比对；
+   不一致则判为 `Misconfigured`。这是"检测而非假设"原则的一个具体应用。
+3. **`AmbientCapabilities=` 是可靠的**，因此"靠 ambient cap 而非 uid 分离传递 `CAP_NET_ADMIN`"
+   这一 C3 结论仍然成立。
+4. 本条也印证了 R09 原有的判断：**特权边界不能只靠 unit 指令**，必须有运行时校验兜底。
+
+**3. ⚠️ `PrivateDevices=yes` 同样静默失效**（`[实测]`，**对 C6 的重要补充**）
+
+C6 断言 `PrivateDevices=yes` 会让 `/dev/net/tun` 消失。原理正确，但在本环境中该指令
+**根本没有生效**：
+
+```text
+systemd-run -p PrivateDevices=yes  →  systemctl show -p PrivateDevices = no
+                                   →  子进程仍能看到 /dev/net/tun
+```
+
+**4. 容器标记的确定性检测方式**（`[实测]`，可直接用于 doctor）
+
+```text
+/run/systemd/container   →  "lxc"        ← 确定性的容器标记文件
+systemctl show -p Virtualization → lxc
+```
+
+这给出了一条比"读 /proc/1/cgroup"更可靠的容器检测方法（R08 曾指出 ShellCrash 依赖
+`/proc/1/cgroup` 在 cgroup v2 下会漏判；容器内 `/proc/1/cgroup` 实测确实为空）。
+**建议 doctor 优先使用 `/run/systemd/container`**，并以 `Virtualization=` 作为交叉验证。
+
+**5. 对"两档 hardening"设计的直接影响**（`[实测]`）
+
+- **`AmbientCapabilities=` 可用** → `tun-enabled` 档的权限传递方案成立。
+- **`NoNewPrivileges=` / `PrivateDevices=` / `ProtectSystem=` 等在本环境不可用** →
+  `hardened-proxy-only` 档**不能声称**这些防护已生效。
+- 因此 **agent 的 unit 文件必须按环境分档**，且 **doctor 需要报告哪些指令实际生效**，
+  而不是报告文件里写了什么。
+
+**仍未验证**：在**真实 PVE LXC（非 OrbStack）** 上 `NoNewPrivileges=` 是否同样被忽略；
+以及在 privileged vs unprivileged LXC 下是否表现不同。已加入 R10 §9 的补测清单。
+
+### 4.2.2 真机复核：mihomo unix socket 的两条安全结论（2026-09-12）
+
+R01/R12 在 macOS 上测得的两条结论，本次在 **Linux arm64（mihomo v1.19.30 linux arm64 with go1.26.6）**
+上复现，全部成立：
+
+| 结论 | Linux 实测结果 |
+|---|---|
+| socket 被硬编码 `chmod 0666` | `srw-rw-rw-`（`[实测]`） |
+| unix socket **完全不校验 secret** | 无 header / 正确 Bearer / 错误 Bearer **三者均 200**（`[实测]`） |
+
+**并且验证了 ADR-005 的缓解措施确实可行**（`[实测]`）：
+
+```text
+预建 /run 目录为 0750   → mihomo 不覆盖该目录权限（保持 drwxr-x---）
+mihomo 创建 socket      → 初始 srw-rw-rw- (0666)
+Agent 主动 chmod 0660   → srw-rw---- ，且 API 仍返回 200（功能不受影响）
+```
+
+**对实现的直接指导**：
+
+1. Agent 必须创建 `/run/proxy-agent` 为 `0750` **并确保 mihomo 不会覆盖它** —— 实测确认
+   mihomo 只在目录**不存在**时才 `MkdirAll(0755)`，预建目录的权限被保留。
+2. socket 创建后必须由 Agent 收紧为 `0660`，且**收紧不影响可用性**。
+3. 该收紧动作需纳入 health check（否则重启后可能回到 0666）。
+
+**仍未验证**：`SO_PEERCRED` 在 Rust/tokio 下的可用性与具体 API（属实现阶段）；
+以及真实 PVE LXC 上的权限表现。
+
 ### 4.2 `NoNewPrivileges=` 与 `AmbientCapabilities=` 的交互（重点）
 
 **结论：两者可以同时使用，是官方推荐组合。**
