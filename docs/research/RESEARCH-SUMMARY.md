@@ -66,6 +66,7 @@ docs/research/requirements.md
 | [ADR-004](adr/ADR-004-config-lifecycle.md) | 不可变配置版本库 + 唯一激活路径 + 三层校验 + 失败自动回滚；内核更新与配置更新分离 | reload 带 JSON body；L4 端口检查；active 版本永不删 |
 | [ADR-005](adr/ADR-005-security-model.md) | 四层信任边界；Mihomo 三重加固（loopback + secret + CORS）；unix socket 0660；远程 Bearer token；五值能力状态 | 非 loopback + 无 token ⇒ 拒绝启动；日志脱敏强制 |
 | [ADR-006](adr/ADR-006-deployment-model.md) | **默认 Model D**：Agent + Mihomo + 可选 Sub-Store + metacubexd 静态产物；deb 主分发；不做官方镜像 | 不采用 metacubexd agent/all-in-one；三条独立升级链路 |
+| [ADR-007](adr/ADR-007-metadata-persistence.md) | 元数据驱动选 `rusqlite` + `bundled`（偏离 `AGENTS.md` 的 `sqlx` 基线）；连接池而非全局锁；Domain 增加受校验的重建入口 | 读不出来必须报错、不得默认值；审计用结构化列不用显示 label；Domain 仍只依赖 `thiserror` |
 
 ---
 
