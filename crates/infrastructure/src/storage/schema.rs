@@ -22,7 +22,9 @@ use super::storage_err;
 ///
 /// Recorded in `PRAGMA user_version` so a future build can tell an old database
 /// from a new one rather than discovering the difference through a query error.
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// Version 2 added the configuration, subscription, and credential tables.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Creates every table this build needs.
 ///
@@ -119,6 +121,67 @@ CREATE TABLE IF NOT EXISTS audit_entries (
 );
 
 CREATE INDEX IF NOT EXISTS audit_recent ON audit_entries (at DESC);
+
+CREATE TABLE IF NOT EXISTS config_versions (
+    id              TEXT PRIMARY KEY NOT NULL,
+    instance_id     TEXT NOT NULL,
+    sequence        INTEGER NOT NULL,
+    source_kind     TEXT NOT NULL,
+    source_subscription TEXT,
+    source_rollback_from TEXT,
+    checksum        TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    activated_at    INTEGER,
+    UNIQUE (instance_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS config_versions_by_instance
+    ON config_versions (instance_id, sequence DESC);
+
+-- The active pointer lives here rather than in a file so that switching it is a
+-- single transaction. A separate file could be renamed atomically, but then the
+-- pointer and the version metadata could disagree after a crash with no way to
+-- tell which was newer.
+CREATE TABLE IF NOT EXISTS config_active (
+    instance_id     TEXT PRIMARY KEY NOT NULL,
+    version_id      TEXT NOT NULL,
+    checksum        TEXT NOT NULL,
+    switched_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS config_sequences (
+    instance_id     TEXT PRIMARY KEY NOT NULL,
+    last_sequence   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id              TEXT PRIMARY KEY NOT NULL,
+    name            TEXT NOT NULL,
+    source_kind     TEXT NOT NULL,
+    source_url      TEXT,
+    source_user_agent TEXT,
+    converter       TEXT NOT NULL,
+    target          TEXT NOT NULL,
+    enabled         INTEGER NOT NULL,
+    schedule_seconds INTEGER,
+    last_update_at  INTEGER,
+    last_update_kind TEXT,
+    last_update_target TEXT,
+    last_update_detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS secrets (
+    name            TEXT PRIMARY KEY NOT NULL,
+    value           TEXT NOT NULL,
+    created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_principals (
+    id              TEXT PRIMARY KEY NOT NULL,
+    role            TEXT NOT NULL,
+    token           TEXT NOT NULL,
+    created_at      INTEGER NOT NULL
+);
 ";
 
 #[cfg(test)]
@@ -146,7 +209,17 @@ mod tests {
         let mut connection = memory();
         apply(&mut connection).expect("apply");
 
-        for table in ["instances", "jobs", "audit_entries"] {
+        for table in [
+            "instances",
+            "jobs",
+            "audit_entries",
+            "config_versions",
+            "config_active",
+            "config_sequences",
+            "subscriptions",
+            "secrets",
+            "api_principals",
+        ] {
             let count: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -156,6 +229,55 @@ mod tests {
                 .expect("query");
             assert_eq!(count, 1, "{table} must exist");
         }
+    }
+
+    /// An older database must gain the new tables rather than being rejected:
+    /// `CREATE TABLE IF NOT EXISTS` makes the upgrade additive, so a v1 install
+    /// keeps its instances and jobs.
+    #[test]
+    fn an_older_database_is_upgraded_in_place() {
+        let mut connection = memory();
+        // A v1 database: the original tables, at the original version.
+        connection
+            .execute_batch(
+                "CREATE TABLE instances (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
+                     status TEXT NOT NULL, active_config TEXT, build_version TEXT,
+                     build_flavor TEXT, build_raw TEXT, failure_reason TEXT,
+                     failure_at INTEGER, updated_at INTEGER NOT NULL);
+                 INSERT INTO instances (id, name, status, updated_at)
+                     VALUES ('default', 'default', 'Running', 1);",
+            )
+            .expect("v1 schema");
+        connection
+            .pragma_update(None, "user_version", 1)
+            .expect("set v1");
+
+        apply(&mut connection).expect("upgrade must succeed");
+
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // The pre-existing row must survive the upgrade.
+        let name: String = connection
+            .query_row(
+                "SELECT name FROM instances WHERE id = 'default'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the existing row must survive");
+        assert_eq!(name, "default");
+
+        // And the new tables must now exist.
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='config_versions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(count, 1, "the upgrade must add the new tables");
     }
 
     /// A database from a future build must be refused rather than misread.

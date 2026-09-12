@@ -33,10 +33,12 @@ nix = { workspace = true, features = ["signal"] }
 # on the blocking pool behind a bounded connection set rather than sharing one
 # connection behind a global mutex. See `storage` for why that matters.
 rusqlite = { workspace = true, features = ["bundled"] }
+# Atomic file replacement for configuration bodies: same-directory temp file
+# plus rename is the only way the target is ever seen fully-old or fully-new.
+tempfile.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-tempfile.workspace = true
 
 [features]
 # Enables the socket-permission helpers to be exercised without a real kernel.

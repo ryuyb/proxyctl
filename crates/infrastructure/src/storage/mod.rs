@@ -238,6 +238,7 @@ pub(crate) fn storage_err(reason: impl Into<String>) -> PortError {
 }
 
 pub mod audit;
+pub mod configs;
 pub mod instances;
 pub mod jobs;
 pub mod schema;
