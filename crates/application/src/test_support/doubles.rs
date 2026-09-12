@@ -636,6 +636,8 @@ pub struct FakeProcessManager {
     pub calls: CallLog,
     /// Whether starting should fail.
     pub fail_start: bool,
+    /// A process that `discover` should report, simulating an adopted kernel.
+    pub adoptable: Mutex<Option<ProcessHandle>>,
 }
 
 impl Default for FakeProcessManager {
@@ -644,6 +646,7 @@ impl Default for FakeProcessManager {
             next_pid: Mutex::new(1000),
             calls: CallLog::new(),
             fail_start: false,
+            adoptable: Mutex::new(None),
         }
     }
 }
@@ -665,7 +668,7 @@ impl ProcessManager for FakeProcessManager {
             })
             .unwrap_or(1);
         let _ = options;
-        Ok(ProcessHandle { pid })
+        Ok(ProcessHandle::new(pid, u64::from(pid)))
     }
 
     async fn stop(
@@ -691,6 +694,25 @@ impl ProcessManager for FakeProcessManager {
     ) -> Result<(), PortError> {
         self.calls.push(format!("signal:{signal:?}"));
         Ok(())
+    }
+
+    async fn discover(&self, _options: &StartOptions) -> Result<Option<ProcessHandle>, PortError> {
+        self.calls.push("discover");
+        let adoptable = self
+            .adoptable
+            .lock()
+            .map_err(|_| PortError::Storage("poisoned".into()))?;
+        Ok(*adoptable)
+    }
+
+    async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool, PortError> {
+        self.calls.push("is_alive");
+        let live = *self
+            .next_pid
+            .lock()
+            .map_err(|_| PortError::Storage("poisoned".into()))?;
+        // A handle is alive while its pid is below the next allocation.
+        Ok(handle.pid < live)
     }
 }
 

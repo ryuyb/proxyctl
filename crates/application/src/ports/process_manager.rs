@@ -45,11 +45,30 @@ pub struct StartOptions {
     pub required_capabilities: Vec<CapabilityKind>,
 }
 
-/// A handle to a spawned process.
+/// A handle identifying a kernel process.
+///
+/// Carries a start time as well as a pid, because a pid alone is not an
+/// identity: the operating system recycles them, so a stale pid can name an
+/// unrelated process. The pair survives an agent restart, which is what lets a
+/// restarted agent adopt a kernel it did not spawn — necessary because the
+/// kernel does not write a pid file and is not killed when its parent exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessHandle {
     /// Operating-system process id.
     pub pid: u32,
+    /// Start time from `/proc/<pid>/stat`, field 22.
+    ///
+    /// An opaque kernel-supplied counter whose only useful property here is
+    /// changing when a pid is reused.
+    pub start_time: u64,
+}
+
+impl ProcessHandle {
+    /// Builds a handle.
+    #[must_use]
+    pub const fn new(pid: u32, start_time: u64) -> Self {
+        Self { pid, start_time }
+    }
 }
 
 /// Whether the process is still running.
@@ -106,6 +125,34 @@ pub trait ProcessManager: Send + Sync {
 
     /// Send an allowed signal.
     async fn signal(&self, handle: &ProcessHandle, signal: AllowedSignal) -> Result<(), PortError>;
+
+    /// Finds a running kernel that this process did not spawn.
+    ///
+    /// Needed because a kernel outlives the agent that started it: the parent
+    /// exits, the child is reparented, and nothing records its pid. Without this,
+    /// a restarted agent sees no process, and a start request would spawn a
+    /// second kernel competing for the same ports.
+    ///
+    /// # Contract
+    ///
+    /// Implementations must match on something that identifies *this* kernel
+    /// rather than any process — the executable path and working directory from
+    /// `options`, plus its command line. Returning the wrong process would be
+    /// worse than returning none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError::PermissionDenied`] when process information is
+    /// unreadable, for example with `hidepid` or a masked `/proc`. Callers must
+    /// treat that as "cannot determine" and refuse to start a second kernel,
+    /// rather than as "no kernel is running".
+    async fn discover(&self, options: &StartOptions) -> Result<Option<ProcessHandle>, PortError>;
+
+    /// Whether a handle still refers to the process it named.
+    ///
+    /// Distinguishes "gone" from "that pid now belongs to something else", which
+    /// a bare pid check cannot.
+    async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool, PortError>;
 }
 
 #[cfg(test)]
@@ -121,9 +168,10 @@ mod tests {
 
     #[test]
     fn process_handle_is_copyable_for_reuse() {
-        let handle = ProcessHandle { pid: 42 };
+        let handle = ProcessHandle::new(42, 1);
         let copy = handle;
         assert_eq!(handle.pid, copy.pid);
+        assert_eq!(handle.start_time, copy.start_time);
     }
 
     #[test]

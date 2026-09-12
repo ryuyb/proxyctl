@@ -108,6 +108,42 @@ external-controller-unix: /run/proxy-agent/mihomo.sock
 - **无 systemd 环境**（部分 LXC/容器，C14）回退 `SupervisedChildProcess` 适配器；Application 不得假设 systemd 存在。
 - **重启分工**：MVP 由 Agent 做退避重启，`proxy-agent.service` 用 `Restart=on-failure` 兜底；**Mihomo 子进程不由 systemd 单独 restart**（避免双重决策，C15）。
 
+### D4b. 进程身份必须可从 `/proc` 恢复（2026-09-12 修订）
+
+**发现的缺口**：原设计让 Application 只持有内存中的 `ProcessState { handle: Option<ProcessHandle> }`，
+而 `ProcessHandle { pid: u32 }` 只有一个 pid。R03 的结论是"Agent 必须以自己 spawn 时的 `Child` handle
+为唯一真相来源"——但该结论**在 Agent 重启后失效**。
+
+真机实测（Debian aarch64）确认：
+
+| 事实 | 结果 |
+|---|---|
+| 子进程在父进程退出后是否存活 | **存活**（reparent 到 init） |
+| 未 spawn 它的进程能否按 pid 发信号 | **能** |
+| mihomo 是否写 pid 文件 | **不写**（R03） |
+
+**后果**：`systemctl restart proxy-agent` 之后，`current_handle()` 返回 `None` 而内核仍在运行，
+于是 `StartMihomo` 看到 `Stopped` 并 **spawn 第二个内核**（端口冲突），或 `StopMihomo`
+认为无事可做而**永远停不掉内核**。
+
+**决定**：
+
+1. `ProcessHandle` 增加 `start_time: u64`，取自 `/proc/<pid>/stat` 第 22 字段。
+   **必要性**：pid 会被复用，仅凭 pid 可能在复用后把信号发给无关进程；`(pid, start_time)`
+   才构成稳定身份。
+2. `ProcessManager` 新增 `discover(&self, options: &StartOptions) -> Result<Option<ProcessHandle>, PortError>`，
+   按可执行文件路径 + 工作目录 + cmdline 重新发现一个未由本进程 spawn 的内核。
+3. `ProcessManager` 新增 `is_alive(&self, handle: &ProcessHandle) -> Result<bool, PortError>`，
+   按 `(pid, start_time)` 校验，而非只查 pid。
+
+**替代方案（已否决）**：让 adapter 内部维护 pid 文件来隐藏该缺口。否决理由：
+`start` 返回的 handle 在 Agent 重启后依然失效，缺口仍在；且 adapter 会与 Application 的
+`ProcessState` 形成**两份真相**，违反"状态归 Application、机制归 Infrastructure"的边界。
+
+**降级行为**：`/proc` 不可读时（hidepid、`/proc` masked），`discover` 返回
+`PortError::PermissionDenied`，Application 必须**拒绝启动并给出明确原因**，绝不能
+假装内核不存在然后 spawn 第二个。
+
 ### D5. 就绪与健康检查分层（不得靠 sleep）
 
 ```text

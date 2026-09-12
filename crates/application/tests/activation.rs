@@ -278,7 +278,7 @@ async fn recovery_restarts_rather_than_reloading() {
     // Put the process in a known "running" state so a stop is expected.
     if let Ok(mut state) = harness.ctx.process_state.lock() {
         state.remember(
-            proxy_application::ports::process_manager::ProcessHandle { pid: 4242 },
+            proxy_application::ports::process_manager::ProcessHandle::new(4242, 1),
             proxy_application::ports::process_manager::StartOptions {
                 binary_path: "/bin/mihomo".to_owned(),
                 working_dir: "/tmp".to_owned(),
