@@ -30,7 +30,9 @@ use crate::ports::error::{ConverterError, PortError};
 use crate::ports::event_publisher::{DomainEvent, EventPublisher};
 use crate::ports::instance_repository::InstanceRepository;
 use crate::ports::job_registry::{JobKind, JobRecord, JobRegistry, JobState, JobTarget};
-use crate::ports::mihomo_connection_ops::{ConnectionList, MihomoConnectionOps};
+use crate::ports::mihomo_connection_ops::{
+    CloseOutcome, ConnectionList, ConnectionView, MihomoConnectionOps,
+};
 use crate::ports::mihomo_controller::{MihomoController, ReloadRequest};
 use crate::ports::mihomo_observer::{
     BoxStream, LogEntry, MemorySample, MihomoObserver, TrafficSample,
@@ -762,25 +764,82 @@ impl MihomoObserver for FakeObserver {
     }
 }
 
-/// A connection inspector that reports none.
-pub struct FakeConnectionOps;
+/// A connection inspector over an in-memory list.
+///
+/// Mutable rather than fixed so a test can assert the *effect* of a close: the
+/// port's contract says `close_all` reports how many were active, and a double
+/// that always answered zero could not tell a correct implementation from one
+/// that never counted.
+#[derive(Default)]
+pub struct FakeConnectionOps {
+    /// The list the double reports.
+    pub connections: std::sync::Mutex<Vec<ConnectionView>>,
+    /// Close calls, in order, for assertions about what was attempted.
+    pub closed: CallLog,
+}
+
+impl FakeConnectionOps {
+    /// A double holding `connections`.
+    #[must_use]
+    pub fn with(connections: Vec<ConnectionView>) -> Self {
+        Self {
+            connections: std::sync::Mutex::new(connections),
+            closed: CallLog::default(),
+        }
+    }
+
+    /// The identifiers that were closed, in order.
+    #[must_use]
+    pub fn closed_ids(&self) -> Vec<String> {
+        self.closed.entries()
+    }
+}
 
 #[async_trait]
 impl MihomoConnectionOps for FakeConnectionOps {
     async fn connections(&self) -> Result<ConnectionList, PortError> {
+        // A poisoned lock would mean another test thread panicked while holding
+        // it. Recovering the contents is right for a double: the alternative is to
+        // turn one test's panic into an unrelated test's failure.
+        let connections = match self.connections.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
         Ok(ConnectionList {
-            upload_total: 0,
-            download_total: 0,
-            connections: Vec::new(),
+            upload_total: connections.iter().map(|c| c.upload).sum(),
+            download_total: connections.iter().map(|c| c.download).sum(),
+            connections,
         })
     }
 
-    async fn close_connection(&self, _id: &str) -> Result<(), PortError> {
-        Ok(())
+    async fn close_connection(&self, id: &str) -> Result<CloseOutcome, PortError> {
+        self.closed.push(id);
+        // The real kernel answers 204 whether or not the id existed, so the double
+        // does the same rather than being more helpful than the thing it stands in
+        // for.
+        match self.connections.lock() {
+            Ok(mut guard) => guard.retain(|c| c.id != id),
+            Err(poisoned) => poisoned.into_inner().retain(|c| c.id != id),
+        }
+        Ok(CloseOutcome::Accepted)
     }
 
-    async fn close_all(&self) -> Result<(), PortError> {
-        Ok(())
+    async fn close_all(&self) -> Result<usize, PortError> {
+        self.closed.push("*");
+        let count = match self.connections.lock() {
+            Ok(mut guard) => {
+                let count = guard.len();
+                guard.clear();
+                count
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                let count = guard.len();
+                guard.clear();
+                count
+            }
+        };
+        Ok(count)
     }
 }
 

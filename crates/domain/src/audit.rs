@@ -31,6 +31,12 @@ pub enum AuditAction {
     SubscriptionUpdate,
     /// Applied firewall rules.
     SystemFirewallApply,
+    /// Closed one or more kernel connections.
+    ///
+    /// Audited even though the identifier is not a credential: terminating
+    /// someone's in-flight transfer is an action that affects another user, and
+    /// being able to say who did it and when is the whole reason the audit exists.
+    ConnectionClose,
 }
 
 impl AuditAction {
@@ -47,6 +53,7 @@ impl AuditAction {
             Self::ConfigRollback => "config.rollback",
             Self::SubscriptionUpdate => "subscription.update",
             Self::SystemFirewallApply => "system.firewall.apply",
+            Self::ConnectionClose => "connection.close",
         }
     }
 
@@ -69,6 +76,7 @@ impl AuditAction {
             "config.rollback" => Self::ConfigRollback,
             "subscription.update" => Self::SubscriptionUpdate,
             "system.firewall.apply" => Self::SystemFirewallApply,
+            "connection.close" => Self::ConnectionClose,
             _ => {
                 return Err(DomainError::invariant(format!(
                     "unknown audit action label: {label}"
@@ -184,6 +192,11 @@ pub enum AuditTarget {
     KernelVersion(String),
     /// The host firewall.
     HostFirewall,
+    /// A kernel connection, by the identifier the kernel assigned.
+    ///
+    /// A UUID the kernel generates, not a credential: it names the transfer
+    /// without describing who was talking to where, so it is safe to store.
+    Connection(String),
 }
 
 impl AuditTarget {
@@ -196,6 +209,7 @@ impl AuditTarget {
             Self::Subscription(id) => format!("subscription:{id}"),
             Self::KernelVersion(v) => format!("kernel:{v}"),
             Self::HostFirewall => "firewall:host".to_owned(),
+            Self::Connection(id) => format!("connection:{id}"),
         }
     }
 
@@ -208,6 +222,7 @@ impl AuditTarget {
             Self::Subscription(_) => "subscription",
             Self::KernelVersion(_) => "kernel-version",
             Self::HostFirewall => "host-firewall",
+            Self::Connection(_) => "connection",
         }
     }
 
@@ -220,6 +235,7 @@ impl AuditTarget {
             Self::Subscription(id) => Some(id.as_str()),
             Self::KernelVersion(v) => Some(v.as_str()),
             Self::HostFirewall => None,
+            Self::Connection(id) => Some(id.as_str()),
         }
     }
 
@@ -244,6 +260,10 @@ impl AuditTarget {
             )?)?)),
             "kernel-version" => Ok(Self::KernelVersion(need("kernel-version")?.to_owned())),
             "host-firewall" => Ok(Self::HostFirewall),
+            // The identifier is a kernel-assigned UUID, so it is stored as-is
+            // rather than parsed: this agent did not define its format and must
+            // not reject a record because the kernel changed it.
+            "connection" => Ok(Self::Connection(need("connection")?.to_owned())),
             other => Err(DomainError::invariant(format!(
                 "unknown audit target kind: {other}"
             ))),

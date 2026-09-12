@@ -88,7 +88,7 @@ impl Harness {
                 .controller(controller.clone())
                 .process(process.clone())
                 .observer(Arc::new(FakeObserver))
-                .connections(Arc::new(FakeConnectionOps))
+                .connections(Arc::new(FakeConnectionOps::default()))
                 .configs(configs.clone())
                 .validator(Arc::new(validator))
                 .subscriptions(subscriptions.clone())
