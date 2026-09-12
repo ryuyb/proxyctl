@@ -193,6 +193,35 @@ keep-alive-idle, keep-alive-interval, disable-keep-alive
 
 实测 `tun` 子对象为 `{"enable":false,...}`，包含 `device/stack/dns-hijack/auto-route/auto-detect-interface/mtu/gso/...` 及大量 Linux 专属字段（`iproute2-table-index`、`auto-redirect`、`include-uid`、`route-exclude-address`、`file-descriptor` 等）。`/configs` 的 `tun.enable` 可作为 **TUN 是否实际生效**的读点，但**它只反映配置意图，不代表内核能力可用**。[实测][上游源码 `hub/route/configs.go`]
 
+### 3.3.1 Linux 复核与线格式细节（2026-09-12，linux arm64）
+
+在 Debian（mihomo v1.19.30 linux arm64）上复核，**R01 的 macOS 结论全部成立**，并补充
+了几条实现适配器时必须知道的**线格式细节**（`[实测]`）：
+
+| 端点 | 方法/参数 | 实测结果 |
+|---|---|---|
+| `/configs` | `PUT` + 空 body | **400**（确认不能发空 body） |
+| `/configs` | `PUT` + `{}` | **204** |
+| `/configs` | `PUT` + `{"payload": "<yaml>"}` | **204**，payload 字段名确认 |
+| `/configs` | `PUT` + `{"payload": "<非法 yaml>"}` | **400** + 明确 message；**实例仍 200 存活** |
+| `/configs` | `?force=true` | **204**（上游接受该参数 → Agent 必须自己不带） |
+| `/version` | `GET` | `{"meta":true,"version":"v1.19.30"}` |
+| `/version` | 无 secret | **401** |
+
+**线格式细节（手写解析器必须知道）**：
+
+```text
+GET /proxies  →  {"proxies": { "<name>": {...}, ... }}     ← 嵌套在 "proxies" 键下，非裸数组
+GET /rules    →  {"rules":   [ {"index":0,"type":"Match","payload":"","proxy":"DIRECT",...} ]}
+```
+
+`/proxies` 是**以名字为键的对象**，不是数组；`/rules` 是数组但**包在 `rules` 键下**。
+两者都不是裸数组 —— 按裸数组解析会静默得到空结果。
+
+`/configs` 的端口字段在未配置时为 **`0` 而非 null**（`"port":0`），因此"端口是否存在"
+必须判 `!= 0`，不能判 `is_some`。`tun` 是子对象，`tun.enable` 只反映**配置意图**，
+不代表内核能力可用（与 3.3 结论一致）。
+
 ### 3.4 `GET /proxies/:name` 实测字段
 
 - **通用字段**：`name, type, alive, udp, uot, xudp, tfo, mptcp, smux, history[], extra, interface, routing-mark, provider-name, dialer-proxy, hidden, icon, testUrl, emptyFallback`
