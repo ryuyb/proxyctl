@@ -420,26 +420,33 @@ if [ "${HAVE_SYSTEMD:-1}" -eq 1 ]; then
   step "Reloading systemd"
   systemctl daemon-reload || warn "systemctl daemon-reload failed"
 
-  # Enabled, not started. Starting is the operator's call: this agent manages a
-  # kernel, and bringing it up unasked on someone's server is not the installer's
-  # decision to make.
+  # The *socket* unit is what gets enabled, and `--now` is what makes this install
+  # usable immediately: without starting it, no socket exists until the next boot
+  # and the very first `proxyctl` command fails. That would leave the operator
+  # exactly where this change was meant to remove them.
   #
-  # A failure here is normal for a non-default prefix: `systemctl enable` looks
-  # the unit up under `/etc/systemd/system` and `/usr/lib/systemd/system`, so a
-  # unit installed to `/usr/local/lib/systemd/system` is invisible to it. The
-  # summary reports what actually happened rather than what was attempted.
-  step "Enabling the unit (not starting it)"
-  if systemctl enable proxy-agent >/dev/null 2>&1; then
+  # Enabling the socket, not the service, is the point: the service is started on
+  # demand by systemd when something connects, so nothing needs `systemctl` later.
+  # Enabling the service as well would start it at boot, which is neither necessary
+  # nor what "on demand" means.
+  #
+  # A failure here is normal for a non-default prefix: `systemctl enable` looks for
+  # units under `/etc/systemd/system` and `/usr/lib/systemd/system`, so a unit
+  # installed to `/usr/local/lib/systemd/system` is invisible to it. The summary
+  # reports what actually happened rather than what was attempted.
+  step "Enabling the socket unit (the service starts on demand)"
+  if systemctl enable --now proxy-agent.socket >/dev/null 2>&1; then
     UNIT_ENABLED=1
   else
-    warn "systemctl could not enable the unit."
+    warn "systemctl could not enable and start the socket unit."
     if [ "$PREFIX" != "/usr" ]; then
       warn "This is expected for --prefix ${PREFIX}: systemd looks for units under"
-      warn "/etc/systemd/system and /usr/lib/systemd/system. Link it yourself with:"
+      warn "/etc/systemd/system and /usr/lib/systemd/system. Link them yourself:"
+      warn "  ln -s ${UNIT_DIR}/proxy-agent.socket /etc/systemd/system/proxy-agent.socket"
       warn "  ln -s ${UNIT_DIR}/proxy-agent.service /etc/systemd/system/proxy-agent.service"
-      warn "  systemctl daemon-reload && systemctl enable proxy-agent"
+      warn "  systemctl daemon-reload && systemctl enable --now proxy-agent.socket"
     else
-      warn "Start it manually with: sudo systemctl start proxy-agent"
+      warn "Enable the socket manually: sudo systemctl enable --now proxy-agent.socket"
     fi
   fi
 fi
@@ -453,9 +460,11 @@ info "  binary   ${BIN_DIR}/${BINARY}"
 info "  config   ${CONFIG}"
 if [ "${HAVE_SYSTEMD:-1}" -eq 1 ]; then
   if [ "${UNIT_ENABLED:-0}" -eq 1 ]; then
-    info "  unit     ${UNIT_DIR}/proxy-agent.service (enabled, not started)"
+    info "  units    ${UNIT_DIR}/proxy-agent.{socket,service}"
+    info "           socket enabled; the service starts on the first connection"
   else
-    info "  unit     ${UNIT_DIR}/proxy-agent.service (NOT enabled — see above)"
+    info "  units    ${UNIT_DIR}/proxy-agent.{socket,service}"
+    info "           NOT enabled — see the warning above"
   fi
 fi
 info ""

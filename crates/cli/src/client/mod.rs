@@ -504,17 +504,25 @@ fn describe_errno(errno: Option<i32>) -> String {
                  peer uid/gid check or narrowed its mode. Check the agent's \
                  authentication settings"
             .to_owned(),
-        // No such file: the agent has never run, or the path is wrong.
-        Some(2) => "the socket does not exist, so the agent has not been started. \
-                 Start the service with `sudo systemctl start proxy-agent` rather than \
-                 running the binary by hand (see the README, \"Start the service, not \
-                 the binary\"). If the agent is running, check that this command and the \
-                 agent agree on [agent] socket"
+        // No such file: either nothing is listening and no socket unit created one,
+        // or the path is wrong.
+        //
+        // `systemctl` is named second, as a repair rather than the normal path,
+        // because the packaged install enables a socket unit that makes it
+        // unnecessary — the first command brings the agent up on its own. Sending
+        // someone to `systemctl` first is exactly what this design removes.
+        Some(2) => "no socket exists at this path, so nothing is listening. If this is a \
+                 packaged install the agent starts on demand, so check that the socket \
+                 unit is running (`systemctl status proxy-agent.socket`, which needs \
+                 sudo). Otherwise check that this command and the agent agree on \
+                 [agent] socket"
             .to_owned(),
-        // There is a file, but no process is listening on it — which is what
-        // an agent that exited leaves behind.
-        Some(111) => "nothing is listening on the socket, so the agent exited after \
-                 creating it. Check `systemctl status proxy-agent`"
+        // There is a file, but no process is listening on it. Under socket
+        // activation this is the state an explicit stop leaves behind, which is why
+        // the remedy names the *socket* unit rather than the service.
+        Some(111) => "nothing is listening on the socket. If systemd owns it, the socket \
+                 unit is active but the service is stopped — `systemctl start \
+                 proxy-agent.socket` (with sudo) re-arms it"
             .to_owned(),
         _ => "the socket refused the connection; is the agent running?".to_owned(),
     }
@@ -548,18 +556,22 @@ mod tests {
     /// that does not apply.
     #[test]
     fn each_errno_names_its_own_remedy() {
-        // Missing socket: the agent was never started, so start the service.
+        // No socket at all: name the socket unit. The packaged install makes
+        // `systemctl start` unnecessary, so pointing there first is what this design
+        // removes.
         let missing = describe_errno(Some(2));
-        assert!(missing.contains("has not been started"), "{missing}");
-        assert!(missing.contains("systemctl start proxy-agent"), "{missing}");
-
-        // A file with no listener: the agent exited, so look at its status.
-        let refused = describe_errno(Some(111));
-        assert!(refused.contains("exited"), "{refused}");
+        assert!(missing.contains("no socket exists"), "{missing}");
+        assert!(missing.contains("proxy-agent.socket"), "{missing}");
         assert!(
-            refused.contains("systemctl status proxy-agent"),
-            "{refused}"
+            !missing.contains("systemctl start proxy-agent.service"),
+            "the socket unit is the remedy, not the service: {missing}"
         );
+
+        // A socket with nothing listening: an explicit stop leaves this, so the fix
+        // is to re-arm the socket unit rather than to start the service.
+        let refused = describe_errno(Some(111));
+        assert!(refused.contains("nothing is listening"), "{refused}");
+        assert!(refused.contains("proxy-agent.socket"), "{refused}");
 
         // Reachable but not open to us: a deliberate deployment choice.
         let denied = describe_errno(Some(13));
