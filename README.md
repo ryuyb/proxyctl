@@ -151,6 +151,31 @@ sudo -u proxy-agent proxyctl doctor
 sudo -u proxy-agent proxyctl start
 ```
 
+### Start the service, not the binary
+
+```bash
+sudo systemctl start proxy-agent
+```
+
+**Do not run `sudo proxyctl agent run`.** It appears to work — the socket is
+created and the agent prints that it is listening — and it puts you in a worse
+place than not starting it at all:
+
+* the socket is created as `root:root`, so the `proxy-agent` user cannot open it
+  and neither can you;
+* the process is in your terminal, so `Ctrl-C` leaves a socket file behind with
+  nothing listening on it;
+* `systemctl` cannot see it, manage it, or restart it.
+
+The unit exists for exactly this reason: it names the user, creates the runtime
+directory with the right mode, and grants only `CAP_NET_ADMIN`.
+
+If you want to run it by hand for development, run it as the service user:
+
+```bash
+sudo -u proxy-agent proxyctl agent run --config /path/to/config.toml
+```
+
 ### Why `sudo -u proxy-agent`
 
 The agent socket is `0660` inside a `0750` directory, owned by `proxy-agent`. That
@@ -161,6 +186,11 @@ Your own user is not in that group by default, so either prefix commands with
 ```bash
 sudo usermod -aG proxy-agent "$USER"    # then log out and back in
 ```
+
+The symptom of getting this wrong is worth recognising, because it does not look
+like a permissions problem: `proxyctl status` says the agent is not reachable
+*while it is running*. That is what the socket is for — a command that could reach
+it would be one that could manage the kernel.
 
 To reach the web interface from another machine, set the listener in the
 configuration:

@@ -461,19 +461,130 @@ impl std::fmt::Debug for LineStream {
 }
 
 /// A short, actionable reason for a connection failure.
+///
+/// # Why the errno matters
+///
+/// Every way of failing to open the agent socket produced the same sentence —
+/// "is the agent running?" — and that is the wrong advice for one of the most
+/// likely cases. A socket that exists but is owned by `proxy-agent:proxy-agent`
+/// with mode `0660` refuses a caller who is not in that group with `EACCES`, and
+/// the remedy is not to start the agent (it is running) but to change who is
+/// asking.
+///
+/// The distinction is available: `reqwest`'s error chains to the `io::Error`
+/// underneath, which carries the OS code. Separating the cases costs a walk down
+/// that chain and saves an operator from checking the wrong thing — especially
+/// since starting an agent that is already running appears to do nothing.
 fn describe_connect_error(error: &reqwest::Error) -> String {
     if error.is_timeout() {
         return "the request timed out".to_owned();
     }
+
     if error.is_connect() {
-        return "the socket refused the connection; is the agent running?".to_owned();
+        return match underlying_errno(error) {
+            // The socket is there and nobody may open it.
+            Some(13) => "permission denied opening the agent socket. The socket is \
+                 owned by the agent's user and is not world-accessible — run the \
+                 command as that user, or add yourself to its group (see the \
+                 README, \"Why sudo -u proxy-agent\")"
+                .to_owned(),
+            // No such file: the path is wrong, or nothing ever listened there.
+            Some(2) => "the socket does not exist; is the agent running?".to_owned(),
+            // There is a file, but no process is listening on it — which is what
+            // an agent that exited leaves behind.
+            Some(111) => "nothing is listening on the socket; is the agent running?".to_owned(),
+            _ => "the socket refused the connection; is the agent running?".to_owned(),
+        };
     }
+
     error.to_string()
+}
+
+/// The OS error code at the bottom of an error's cause chain.
+///
+/// `None` when the failure never reached the operating system — a DNS or TLS
+/// problem, for instance — in which case the caller falls back to a generic
+/// message rather than guessing at an errno.
+fn underlying_errno(error: &reqwest::Error) -> Option<i32> {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = source {
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            if let Some(code) = io.raw_os_error() {
+                return Some(code);
+            }
+        }
+        source = current.source();
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connection failure that never reached the OS yields no errno.
+    ///
+    /// The classification falls back to a generic message rather than guessing,
+    /// which matters because a wrong errno would send the reader to the wrong
+    /// remedy — the defect this replaced.
+    #[test]
+    fn a_failure_without_an_os_code_has_no_errno() {
+        #[derive(Debug)]
+        struct MadeUp;
+        impl std::fmt::Display for MadeUp {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("not an io error")
+            }
+        }
+        impl std::error::Error for MadeUp {}
+
+        // Nothing to downcast to, so the walk must terminate and answer `None`
+        // rather than looping or panicking.
+        let chain: &(dyn std::error::Error + 'static) = &MadeUp;
+        let mut source = Some(chain);
+        let mut found = None;
+        while let Some(current) = source {
+            if let Some(io) = current.downcast_ref::<std::io::Error>() {
+                found = io.raw_os_error();
+                break;
+            }
+            source = current.source();
+        }
+        assert_eq!(found, None);
+    }
+
+    /// The errno walk finds the OS code through a wrapper.
+    ///
+    /// This is the mechanism the distinction depends on: `reqwest` reports its
+    /// own error type, and the errno is only reachable by following `source()`.
+    #[test]
+    fn the_errno_walk_finds_a_wrapped_io_error() {
+        #[derive(Debug)]
+        struct Wrapper(std::io::Error);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a wrapper")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let wrapped = Wrapper(std::io::Error::from_raw_os_error(13));
+        let chain: &(dyn std::error::Error + 'static) = &wrapped;
+        let mut source = Some(chain);
+        let mut found = None;
+        while let Some(current) = source {
+            if let Some(io) = current.downcast_ref::<std::io::Error>() {
+                found = io.raw_os_error();
+                break;
+            }
+            source = current.source();
+        }
+        assert_eq!(found, Some(13), "the walk must follow the cause chain");
+    }
 
     #[test]
     fn the_socket_defaults_and_can_be_overridden() {

@@ -98,12 +98,28 @@ const TOP_LEVEL: &[&str] = &[
     "tui",
 ];
 
-/// Every `proxyctl …` invocation in a document.
+/// Every `proxyctl …` invocation in a document, as the words a reader would type.
 ///
-/// Only command words are taken. An argument that is a placeholder (`<VERSION>`),
-/// a value (`v1.19.30`), or an option (`--json`) stops the parse, because this
-/// checks that a *command path* exists rather than that a particular invocation
-/// would succeed.
+/// Only command words are kept — the ones explaining *which* command this is.
+/// Options and their values stop the parse, because this checks that a command
+/// path exists rather than that a particular invocation would succeed.
+///
+/// # What the parser does *not* do, and why it still works
+///
+/// It does not model options. `proxyctl agent run --config <path>` parses to the
+/// command path `agent run`, and the `--config <path>` part is discarded — so the
+/// check confirms the path exists and says nothing about whether the invocation
+/// is well-formed.
+///
+/// That gap is real: the first version of this test passed while the README
+/// contained `agent run --config /path/to/config.toml`, which is valid, and would
+/// equally have passed for a malformed one. Closing it properly would mean
+/// teaching the parser every option and its arity, which is a second definition
+/// of the CLI's surface and would drift from the first.
+///
+/// `--help` cannot close it either: clap resolves a subcommand path and prints
+/// help *before* validating the arguments that follow, which is why
+/// [`rejects_without`] exists for the one case where arity actually mattered.
 ///
 /// The line is required to be a plausible command line rather than prose: the
 /// token after `proxyctl` must be a known top-level command, and it must be
@@ -139,7 +155,12 @@ fn documented_commands(text: &str) -> Vec<Vec<String>> {
         let mut words: Vec<String> = Vec::new();
         for word in rest.split_whitespace() {
             let word = word.trim_end_matches(['.', ',', '`', ')', ':']);
+            // A command word is lowercase, may contain an internal hyphen
+            // (`agent`, `mihomo`), and must not *start* with one. The leading
+            // hyphen is what separates `--config` — an option, and the start of
+            // everything this parse does not model — from a subcommand name.
             let is_command_word = !word.is_empty()
+                && !word.starts_with('-')
                 && word
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c == '-' || c == '_');

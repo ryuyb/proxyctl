@@ -131,6 +131,26 @@ sudo -u proxy-agent proxyctl doctor
 sudo -u proxy-agent proxyctl start
 ```
 
+### 用服务启动，而不是直接跑二进制
+
+```bash
+sudo systemctl start proxy-agent
+```
+
+**不要运行 `sudo proxyctl agent run`。** 它看起来能跑 —— socket 建出来了，agent 也打印了监听地址 —— 但结果比不启动更糟：
+
+* socket 属主是 `root:root`，`proxy-agent` 用户打不开，你也打不开；
+* 进程挂在你的终端里，`Ctrl-C` 之后会留下一个没有监听者的 socket 文件；
+* `systemctl` 看不到它，管不了它，也重启不了它。
+
+unit 存在的理由就是这个：它指定了用户、用正确的权限创建运行目录、并且只授予 `CAP_NET_ADMIN`。
+
+如果你想手工跑（开发场景），以服务用户的身份运行：
+
+```bash
+sudo -u proxy-agent proxyctl agent run --config /path/to/config.toml
+```
+
 ### 为什么要 `sudo -u proxy-agent`
 
 agent socket 是 `0750` 目录下的 `0660` 文件，属主为 `proxy-agent`。**这就是访问控制的边界**：谁能打开这个 socket，谁就能管理内核。你自己的用户默认不在该组里，所以要么给命令加 `sudo -u proxy-agent`，要么把自己加进去：
@@ -138,6 +158,8 @@ agent socket 是 `0750` 目录下的 `0660` 文件，属主为 `proxy-agent`。*
 ```bash
 sudo usermod -aG proxy-agent "$USER"    # 之后需要重新登录
 ```
+
+搞错时的症状值得记住，因为它看起来不像权限问题：**agent 明明在跑，`proxyctl status` 却说连不上。** 这正是 socket 的作用 —— 能连上就意味着能管理内核。
 
 要从另一台机器访问 Web 界面，在配置里设置监听：
 
