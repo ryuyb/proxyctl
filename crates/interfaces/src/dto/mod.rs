@@ -15,6 +15,7 @@
 //! line, which is exactly the review checkpoint this layer provides.
 
 use proxy_application::ports::mihomo_connection_ops::{ConnectionList, ConnectionView};
+use proxy_application::ports::types::ProxyList;
 use serde::{Deserialize, Serialize};
 
 use proxy_application::ports::job_registry::{JobRecord, JobState};
@@ -436,6 +437,68 @@ pub struct ValidationDto {
     pub semantic: String,
     /// Whether every layer passed or was skipped.
     pub acceptable: bool,
+}
+
+/// A strategy group.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyGroupDto {
+    /// Group name.
+    pub name: String,
+    /// Group type, such as `select`.
+    pub kind: String,
+    /// The currently selected member.
+    ///
+    /// `None` for a group that has not chosen one, which is different from a group
+    /// whose selection is the empty string — the kernel does not send the second.
+    pub now: Option<String>,
+    /// Member names, in the order the kernel reports them.
+    pub members: Vec<String>,
+}
+
+/// A proxy node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyDto {
+    /// Node name.
+    pub name: String,
+    /// Protocol type, such as `ss`.
+    pub kind: String,
+    /// The most recent delay measurement, when one was taken.
+    pub delay_millis: Option<u32>,
+}
+
+/// The kernel's proxy groups and nodes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxiesDto {
+    /// Strategy groups.
+    pub groups: Vec<ProxyGroupDto>,
+    /// Individual nodes.
+    pub proxies: Vec<ProxyDto>,
+}
+
+impl From<ProxyList> for ProxiesDto {
+    fn from(list: ProxyList) -> Self {
+        Self {
+            groups: list
+                .groups
+                .into_iter()
+                .map(|group| ProxyGroupDto {
+                    name: group.name,
+                    kind: group.kind,
+                    now: group.now,
+                    members: group.members,
+                })
+                .collect(),
+            proxies: list
+                .proxies
+                .into_iter()
+                .map(|proxy| ProxyDto {
+                    name: proxy.name,
+                    kind: proxy.kind,
+                    delay_millis: proxy.delay_millis,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One live connection.

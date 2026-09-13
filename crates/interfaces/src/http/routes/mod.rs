@@ -32,6 +32,10 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{API_PREFIX}/health"), get(system::get_health))
         .route(&format!("{API_PREFIX}/doctor"), get(system::get_doctor))
         .route(&format!("{API_PREFIX}/mihomo"), get(mihomo::get_status))
+        .route(
+            &format!("{API_PREFIX}/mihomo/proxies"),
+            get(mihomo::proxies),
+        )
         .route(&format!("{API_PREFIX}/mihomo/start"), post(mihomo::start))
         .route(&format!("{API_PREFIX}/mihomo/stop"), post(mihomo::stop))
         .route(

@@ -277,6 +277,38 @@ impl ListJobs {
     }
 }
 
+/// Reads the kernel's proxy groups and nodes.
+///
+/// # Why this did not exist before
+///
+/// `MihomoController::proxies` has been implemented since the controller adapter
+/// was written, and nothing ever called it. The TUI specification in AGENTS.md
+/// lists proxy groups as a panel, so the query exists to serve that — and the
+/// absence is a reminder that an implemented port method is not an exposed
+/// feature.
+///
+/// It takes no lock, for the reason in this module's header: reading is not a
+/// state change, and a dashboard must not freeze behind an activation.
+///
+/// # Errors
+///
+/// Returns [`ApplicationError::Port`] when the kernel is unreachable or answers in
+/// a shape this build does not recognise.
+pub struct ListProxies;
+
+impl ListProxies {
+    /// Reads groups and nodes.
+    ///
+    /// # Errors
+    ///
+    /// As [`ListProxies`].
+    pub async fn execute(
+        ctx: &AppContext,
+    ) -> Result<crate::ports::types::ProxyList, ApplicationError> {
+        Ok(ctx.controller.proxies().await?)
+    }
+}
+
 /// Opens the kernel's log stream.
 ///
 /// # Why this is a query and not just a pass-through

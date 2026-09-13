@@ -47,6 +47,8 @@ proxy-interfaces = { path = "../interfaces" }
 proxy-application = { path = "../application" }
 proxy-domain = { path = "../domain" }
 thiserror.workspace = true
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 
 [dev-dependencies]
 tempfile.workspace = true

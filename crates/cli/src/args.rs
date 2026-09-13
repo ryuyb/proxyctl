@@ -100,6 +100,12 @@ pub enum TopCommand {
     /// Manage API tokens for the network listener.
     #[command(subcommand)]
     Token(TokenCommand),
+
+    /// Open the terminal interface.
+    ///
+    /// A client like every other command, so it reaches a remote agent with the
+    /// same `--socket` and `--token`.
+    Tui,
 }
 
 /// The `token` subcommands.

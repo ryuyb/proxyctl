@@ -29,6 +29,7 @@ pub mod endpoint;
 pub mod exit;
 pub mod runtime;
 pub mod token;
+pub mod tui;
 
 pub use command::{Command, Format, Request};
 pub use exit::Exit;

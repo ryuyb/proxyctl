@@ -5,11 +5,11 @@ use axum::extract::State;
 use proxy_application::commands::lifecycle::{
     ReloadMihomo, RestartMihomo, StartMihomo, StopMihomo,
 };
-use proxy_application::queries::GetMihomoStatus;
+use proxy_application::queries::{GetMihomoStatus, ListProxies};
 use proxy_domain::shared::time::Timestamp;
 use serde::Serialize;
 
-use crate::dto::MihomoStatusDto;
+use crate::dto::{MihomoStatusDto, ProxiesDto};
 use crate::http::auth::require_write;
 use crate::http::error::HttpError;
 use crate::http::state::{AppState, Caller};
@@ -48,6 +48,19 @@ pub async fn get_status(
             .await?
             .into(),
     ))
+}
+
+/// Lists proxy groups and nodes.
+///
+/// # Errors
+///
+/// Returns an error when the kernel is unreachable or answers in an unrecognised
+/// shape.
+pub async fn proxies(
+    State(state): State<AppState>,
+    _caller: Caller,
+) -> Result<Json<ProxiesDto>, HttpError> {
+    Ok(Json(ListProxies::execute(&state.ctx).await?.into()))
 }
 
 /// Starts the kernel.

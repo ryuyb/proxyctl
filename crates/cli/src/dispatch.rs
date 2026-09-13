@@ -69,6 +69,22 @@ pub async fn run(cli: Cli) -> Exit {
         return stream_events(&cli.socket, &cli.token, args, format).await;
     }
 
+    // The TUI owns the terminal for its whole run, so it is dispatched before
+    // anything else can print — a message written while it is open would corrupt
+    // the display.
+    if matches!(cli.command, TopCommand::Tui) {
+        let Some(client) = connect(&cli.socket, &cli.token) else {
+            return Exit::Usage;
+        };
+        return match crate::tui::run(client).await {
+            Ok(()) => Exit::Success,
+            Err(e) => {
+                eprintln!("proxyctl: {e}");
+                Exit::Failure
+            }
+        };
+    }
+
     // Token commands open the database directly rather than going over the socket:
     // issuing a token is what makes a listener allowed to exist, so it must work
     // before one is running. See the module for why.
@@ -398,7 +414,7 @@ pub fn build(top: &TopCommand) -> Option<Box<dyn Command>> {
             id: args.id.clone(),
         }),
         TopCommand::Logs(_) | TopCommand::Events(_) | TopCommand::Agent(_) => return None,
-        TopCommand::Token(_) => return None,
+        TopCommand::Token(_) | TopCommand::Tui => return None,
     };
     Some(command)
 }
