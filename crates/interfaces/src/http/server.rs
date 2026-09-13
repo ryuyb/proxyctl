@@ -19,8 +19,13 @@
 //! successful connection is treated as an operator. A deployment that wants more
 //! than that either configures a uid/gid peer check or narrows the mode.
 //!
-//! This is the opposite of the kernel's socket, where the filesystem mode *is* the
-//! whole boundary because Mihomo does not authenticate on a unix socket.
+//! This is the opposite of the kernel's socket, where the filesystem mode would be
+//! the whole boundary — Mihomo does not authenticate on a unix socket — except that
+//! upstream hardcodes `chmod 0666` on it and the agent cannot tighten that. So the
+//! kernel's socket is **not** protected, and opening this one leaves it reachable:
+//! anything local can `PUT /configs` and replace the running configuration. Recorded
+//! as an accepted risk in `AGENTS.md`; separating the two sockets into directories
+//! with different modes is the fix if it ever needs removing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,9 +104,10 @@ impl SocketSpec {
             // the boundary. A deployment that wants the older behaviour sets a
             // group check or narrows `mode` in its own configuration.
             //
-            // This is deliberately *not* the mode used for the kernel's socket:
-            // Mihomo does not authenticate on a unix socket, so there the file
-            // permissions are the whole boundary and stay at 0660.
+            // Note what this does *not* buy: the kernel's socket is hardcoded `0666`
+            // by upstream and cannot be tightened, so on a shared runtime directory
+            // the open agent socket leaves the unauthenticated kernel socket
+            // reachable by any local user. See the module header.
             mode: 0o666,
         }
     }

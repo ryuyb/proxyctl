@@ -36,9 +36,11 @@ ExecStart=/usr/bin/proxyctl agent run --config /etc/proxy-agent/config.toml
 # 0700: they hold the database, the kernel secret, and stored configs, and no
 # local user should read them.
 #
-# `mihomo.sock` lives in the same runtime directory and stays 0660, applied by the
-# agent rather than by the unit. Mihomo does not verify its secret on a unix
-# socket, so there the file mode is the entire boundary.
+# Note that this also exposes `mihomo.sock`, which is not protected: upstream
+# hardcodes `chmod 0666` on the kernel's controller socket and verifies no secret
+# over a unix socket, so any local user can `PUT /configs` and replace the running
+# configuration. A 0750 directory used to block that; a traversable one does not.
+# Accepted for single-user hosts and containers — see AGENTS.md, "Unix socket".
 RuntimeDirectory=proxy-agent
 RuntimeDirectoryMode=0755
 StateDirectory=proxy-agent

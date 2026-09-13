@@ -196,8 +196,12 @@ What this means in practice:
 * on a single-user server, or inside a container, it is exactly as convenient as
   it sounds: install, start the service, use `proxyctl` as yourself;
 * on a machine with several untrusted local users, any of them can manage the
-  kernel through the socket. If that matters to you, tighten it — either narrow
-  the socket mode, or configure a peer check in `config.toml`:
+  kernel through the socket. Note that this is *two* grants, not one: they can
+  also reach `mihomo.sock` directly (hardcoded `0666` by upstream) and replace the
+  running kernel configuration. Narrowing the agent socket does **not** close the
+  second — the kernel's own socket has to be moved somewhere unreachable, as
+  described below. If any of that matters to you, tighten the agent socket —
+  either narrow its mode, or configure a peer check in `config.toml`:
 
 ```toml
 [agent]
@@ -205,9 +209,21 @@ socket_allowed_uid = 1000   # only this uid may connect
 # socket_allowed_gid = 1000 # or a group, or both
 ```
 
-The kernel's own socket is a different matter and stays tight: Mihomo does not
-authenticate on a unix socket, so `mihomo.sock` is `0660` and its directory
-denies write access to everyone else.
+The kernel's own socket is **not** protected, and this is worth knowing before you
+rely on it: Mihomo hardcodes `chmod 0666` on its controller socket and does not
+verify its secret over a unix socket, so anything on the machine can reach it:
+
+```bash
+curl -X PUT --unix-socket /run/proxy-agent/mihomo.sock -d '{}' http://localhost/configs
+```
+
+That replaces the running kernel configuration. The agent cannot tighten it —
+upstream sets the mode itself. Before the agent socket was opened, a `0750`
+runtime directory blocked this; the directory is now traversable, so nothing does.
+On a single-user host or in a container that is not a difference the operator
+cares about, which is why it is accepted here. If it matters to you, point
+`external-controller-unix` at a socket inside a directory of its own that is
+`0750`, so the kernel's file is unreachable while the agent's stays open.
 
 To reach the web interface from another machine, set the listener in the
 configuration:
@@ -334,8 +350,11 @@ rather than a credential.
   peer credential (`SO_PEERCRED`) is an *optional additional* check, off by
   default because LXC uid mapping can make a correct peer look wrong. This is the
   deliberate trade described under [Who can use it](#who-can-use-it).
-* **Unix socket (kernel).** `0660`, and this one *is* the boundary: Mihomo does
-  not verify its secret on a unix socket, so the file mode is all there is.
+* **Unix socket (kernel).** `0666`, because Mihomo hardcodes that and will not
+  verify its secret over a unix socket. It is therefore *not* protected: any local
+  user can reach it and replace the running configuration. See
+  [Who can use it](#who-can-use-it) — this is the accepted cost of opening the
+  agent socket, and it is stated plainly rather than implied to be safe.
 * **TCP.** A token is required, with **no loopback exemption** — loopback is not a
   trust boundary on a host that also runs untrusted software. Configuring a
   listener requires at least one token to exist, or the agent refuses to start.
@@ -379,7 +398,7 @@ makes it testable without any of them.
 /var/lib/proxy-agent/configs/       immutable versions
 /var/lib/proxy-agent/database.sqlite
 /run/proxy-agent/agent.sock         the agent        (0666; any local user)
-/run/proxy-agent/mihomo.sock        the kernel       (0660)
+/run/proxy-agent/mihomo.sock        the kernel       (0666; upstream hardcodes it)
 ```
 
 **Documentation at this stage** — the reasoning, the measurements, and the

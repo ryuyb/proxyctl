@@ -464,17 +464,20 @@ const DATA_DIR_MODE: u32 = 0o750;
 
 /// Permissions for the runtime directory, which holds the control socket.
 ///
-/// The kernel does not authenticate on a unix socket, so this directory and the
-/// socket inside it are the whole boundary for the kernel — which is why the
-/// `mihomo.sock` file itself stays `0660`.
-///
-/// The *directory* is `0751`, not `0750`: it is normally shared with `agent.sock`,
+/// The directory is `0751`, not `0750`: it is normally shared with `agent.sock`,
 /// which is meant to be reachable by any local user and authenticates the caller
-/// itself. A directory that denies `x` to others would block those clients before
-/// they could present anything, so it must remain traversable; write access is
-/// still denied, which is what prevents one user from replacing another's socket.
+/// itself. A directory denying `x` to others would block those clients before they
+/// could present anything; write access is still denied, which stops one user from
+/// replacing another's socket.
 ///
-/// The kernel socket's own `0660` is what keeps the kernel protected either way.
+/// # What this directory no longer protects
+///
+/// It used to be the barrier for `mihomo.sock`, which holds no authentication of
+/// its own. It is not one any more, and the mode cannot restore that: upstream
+/// hardcodes `chmod 0666` on the kernel's socket, so a traversable directory makes
+/// it reachable by any local user — measured, and recorded as an accepted risk in
+/// `AGENTS.md`. Separating the two sockets into directories with different modes is
+/// the fix if that risk is ever worth removing.
 const RUN_DIR_MODE: u32 = 0o751;
 
 /// Whether a directory's mode must end up restrictive, or merely preferably so.

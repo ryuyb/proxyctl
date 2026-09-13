@@ -179,6 +179,11 @@ mod tests {
 
     #[test]
     fn expected_modes_are_restrictive() {
+        // The constant describes what the agent *would* apply. It is not what the
+        // kernel's socket ends up as: upstream hardcodes `chmod 0666` after this
+        // would run, and nothing calls `tighten_socket` anyway, so `mihomo.sock` is
+        // world-writable on a real install. Do not read this assertion as a
+        // statement about the live system.
         assert_eq!(SOCKET_MODE, 0o660, "group access only, never world");
         assert_eq!(DIRECTORY_MODE, 0o750, "owner traversal only");
     }

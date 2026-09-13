@@ -608,11 +608,31 @@ deliberate: the client is meant to work without anyone being added to a dedicate
 group. On a multi-user host that means every local user can manage the kernel, so
 a deployment that cares must narrow it — either the socket mode or a peer check.
 
-**The kernel socket does rely on permissions**, and must keep doing so. Mihomo does
-not verify its `secret` over a unix socket, so `mihomo.sock` is `0660` and its
-directory denies write to others. This is the reason the shared runtime directory
-is `0751` rather than `0750`: traversable, so a local client can reach the
-authenticated agent socket, but not writable, so no one can replace the kernel's.
+**The kernel socket is not protected, and that is a known accepted risk.** Mihomo
+hardcodes `chmod 0666` on its controller socket and does not verify its `secret`
+over a unix socket, so `mihomo.sock` is world-writable and the agent cannot tighten
+it — measured, not inferred. Upstream's own source has the `os.Chmod(addr, 0o666)`;
+`crates/infrastructure/src/mihomo/socket.rs` has a `tighten_socket` that would set
+`0660`, but nothing calls it.
+
+This matters *because* the runtime directory became `0751` to let any local user
+reach the authenticated agent socket. That also lets any local user reach the
+kernel's socket, which is unauthenticated:
+
+```text
+curl -X PUT --unix-socket /run/proxy-agent/mihomo.sock -d '{}' http://localhost/configs
+```
+
+Verified as an unprivileged user: `GET /version` returns `200` and `PUT /configs`
+returns `204`, so any local user can replace the running kernel configuration. Before
+the socket was opened, the `0750` directory was what prevented this; now nothing
+does. The two requirements are genuinely in conflict when the sockets share a
+directory, and separating them (`kernel/mihomo.sock` under `0750`) is the fix if
+that risk is ever worth removing. It is deliberately not applied today: the target
+deployments are single-user hosts and containers, where the local users are the
+operator.
+
+Do not describe the kernel socket as protected by its mode. It is not.
 
 ### Web authentication
 

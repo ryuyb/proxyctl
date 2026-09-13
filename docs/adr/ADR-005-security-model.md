@@ -103,8 +103,15 @@ external-controller-cors:
 
 **决策。** agent socket 改为 `0666`，运行目录改为 `0751`，**agent 自己做调用方认证**
 （`AuthPolicy`；TCP 上强制 bearer token，本地 socket 上默认为「能连上即操作员」）。
-**内核 socket 保持 `0660`** —— Mihomo 在 unix socket 上不校验 `secret`，那里文件权限
-就是全部边界，这一点没有改变。
+**内核 socket 的处境与直觉相反，且本次修订暴露了一个问题。** Mihomo 给自己 controller
+socket 硬编码 `chmod 0666`，且不在 unix socket 上校验 `secret`；`mihomo.sock` 实测确为
+`srw-rw-rw-`。Agent 曾经有收紧它的意图（`socket.rs` 的 `tighten_socket` 会设为 `0660`），
+但**该函数没有任何调用点**，所以实际上从未生效。
+
+在本次修订之前，拦住非特权用户的是 `0750` 的运行目录；目录改为 `0751` 后这道屏障消失。
+实测：以非特权用户身份 `GET /version` 返回 `200`，`PUT /configs` 返回 `204` ——
+即可替换内核运行配置。这是一个**已知并明确接受**的风险（目标部署为单用户主机/容器），
+不是疏漏；若将来需要消除，正解是让两个 socket 分处不同权限的目录，而不是指望收紧内核 socket。
 
 **为什么这不是一次无条件放宽。**
 

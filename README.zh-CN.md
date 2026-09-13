@@ -168,7 +168,13 @@ socket_allowed_uid = 1000   # 只有这个 uid 能连
 # socket_allowed_gid = 1000 # 或者按组，或者两个都配
 ```
 
-内核自己的 socket 是另一回事，它保持很紧：Mihomo 在 unix socket 上**不校验** secret，所以 `mihomo.sock` 是 `0660`，其所在目录也拒绝其他人的写权限。
+内核自己的 socket **并没有被保护**，这点在你依赖它之前值得知道：Mihomo 给自己 controller socket 硬编码了 `chmod 0666`，且在 unix socket 上**不校验** secret，所以机器上任何东西都能访问它：
+
+```bash
+curl -X PUT --unix-socket /run/proxy-agent/mihomo.sock -d '{}' http://localhost/configs
+```
+
+这会替换内核正在运行的配置。Agent 无法收紧它 —— 模式是上游自己设的。在 agent socket 放开之前，`0750` 的运行目录挡住了这条路；现在目录可穿越，就没有东西挡了。单用户主机或容器里这不是运维需要关心的差别，所以这里是接受该风险的。如果你在意，把 `external-controller-unix` 指到一个自己独占的 `0750` 目录里，这样内核的 socket 不可达而 agent 的仍然开放。
 
 要从另一台机器访问 Web 界面，在配置里设置监听：
 
@@ -271,7 +277,7 @@ proxyctl agent run --print-config
 简版：**认证是唯一的授权环节** —— 没有角色，通过认证就能做任何事。本地 socket 信任任何能连上它的人，TCP 必须带 token，浏览器拿到的是 cookie 而非凭证。
 
 * **Unix socket（agent）。** 权限 `0666`，位于一个可穿越的目录。agent 自己做调用方认证；能连上 socket 就等于拥有操作员身份。对端凭证（`SO_PEERCRED`）是**额外可选**的检查，默认关闭 —— 因为 LXC 的 uid 映射会让正确的对端看起来不对。这是[谁能用](#谁能用)里说明的刻意取舍。
-* **Unix socket（内核）。** `0660`，这一个**就是**边界：Mihomo 在 unix socket 上不校验 secret，文件权限就是全部。
+* **Unix socket（内核）。** `0666`，因为 Mihomo 硬编码该值，且在 unix socket 上不校验 secret。因此它**不被保护**：本机任何用户都能访问它并替换运行中的配置。这是放开 agent socket 的代价，这里直说而不是暗示它安全。
 * **TCP。** 必须有 token，且**没有 loopback 豁免** —— 在同样运行着不可信软件的机器上，loopback 不是信任边界。配置监听时至少要存在一个 token，否则 agent 拒绝启动。
 * **浏览器**用 token 换取 `HttpOnly; SameSite=Strict` 的 cookie。**刻意没有 CSRF token**：那要求它可被脚本读取，而这正是 cookie 方案要避免的问题。
 * **内核 secret 永远不会到达页面。** 由反代注入。上游自己的 all-in-one server 是把控制 token 放进浏览器的；这里不这么做。

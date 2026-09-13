@@ -68,16 +68,17 @@ async fn composition_opens_the_metadata_store() {
     );
 }
 
-/// The run directory holds two sockets with opposite requirements, and the
-/// property asserted here is what reconciles them.
+/// The run directory must be traversable but not writable.
 ///
-/// `agent.sock` is `0666` and authenticates its caller itself, so the directory
-/// must stay *traversable* by any local user — a directory that denied `x` to
-/// others would block the client before it could present anything.
+/// Traversable because `agent.sock` is `0666` and authenticates its caller itself:
+/// a directory denying `x` to others would block the client before it could present
+/// anything. Not writable because a world-writable directory lets one local user
+/// unlink and replace another's socket, whoever owns it.
 ///
-/// `mihomo.sock` is unauthenticated, so it may not be replaced by another user;
-/// denying write to others is what prevents that. The kernel socket's own `0660`
-/// is the second half of that protection.
+/// The mode is deliberately *not* the whole story for the kernel's socket, and the
+/// assertions here must not be read as protection for it: upstream hardcodes
+/// `chmod 0666` on `mihomo.sock`, so a traversable directory leaves it reachable by
+/// any local user. That is an accepted risk recorded in `AGENTS.md`.
 #[tokio::test]
 async fn the_run_directory_is_traversable_but_not_writable() {
     let dir = tempfile::tempdir().expect("dir");
@@ -120,7 +121,7 @@ async fn the_configs_directory_is_not_world_accessible() {
 
 /// A directory that already exists world-writable must be tightened, not
 /// accepted: a world-writable directory lets one local user unlink and replace
-/// another's socket, which is the protection the kernel socket depends on.
+/// another's socket.
 #[tokio::test]
 async fn an_existing_world_writable_directory_is_tightened() {
     let dir = tempfile::tempdir().expect("dir");
