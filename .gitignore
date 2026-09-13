@@ -1,7 +1,33 @@
 # Rust build artifacts
 /target/
 **/*.rs.bk
-Cargo.lock
+
+# `Cargo.lock` **is committed**, deliberately.
+#
+# The usual advice — ignore it for libraries — applies to crates that are only
+# ever consumed as dependencies, where the resolver is free to pick newer
+# compatible versions. This workspace produces a binary that is released, and for
+# that the lockfile is the difference between "the release was built from these
+# versions" and "the release was built from whatever was current that day".
+#
+# It also makes `cargo build --locked` meaningful, which is what the release
+# workflow uses. Without a committed lockfile that flag has nothing to check
+# against and the build fails before it starts.
 
 # Local toolchain cache used when the global CARGO_HOME is not writable
 /.cargo/
+
+# pnpm's content-addressable store.
+#
+# It is 376 MB and it is a *cache*: every file in it is reproducible from the
+# lockfile, and none of it belongs in a repository. It appears at the workspace
+# root when pnpm resolves a store relative to the workspace rather than to the
+# user's home — which is what happened here, and how 16,499 files reached a
+# commit before anyone noticed.
+#
+# Listed at every level a store can appear, because which one pnpm picks depends
+# on how it was invoked.
+.pnpm-store/
+**/.pnpm-store/
+node_modules/
+**/node_modules/

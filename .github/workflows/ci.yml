@@ -44,11 +44,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # `--locked` throughout: the lockfile is committed precisely so that CI and
+      # a release resolve the same versions. Without the flag, a dependency could
+      # publish a new release and this job would go green on a tree nobody has.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
   frontend:
     name: Frontend
@@ -111,7 +114,7 @@ jobs:
         run: ./scripts/fetch-metacubexd.sh --strict
 
       - name: Build
-        run: cargo build -p proxyctl
+        run: cargo build -p proxyctl --locked
 
       - name: Assert both interfaces were embedded
         run: |
