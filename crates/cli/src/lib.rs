@@ -25,6 +25,7 @@ pub mod args;
 pub mod client;
 pub mod command;
 pub mod dispatch;
+pub mod endpoint;
 pub mod exit;
 pub mod runtime;
 pub mod token;

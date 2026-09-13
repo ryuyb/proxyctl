@@ -15,6 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::endpoint::API_PREFIX;
+use crate::endpoint::Endpoint;
 use crate::exit::Exit;
 
 /// How long a request may take before the CLI gives up.
@@ -136,35 +138,82 @@ pub fn resolve_socket(explicit: Option<&Path>) -> PathBuf {
     PathBuf::from(DEFAULT_SOCKET)
 }
 
-/// A client bound to one socket.
+/// A client bound to one agent, over a socket or over TCP.
 #[derive(Debug, Clone)]
 pub struct Client {
-    socket: PathBuf,
+    endpoint: Endpoint,
     http: reqwest::Client,
 }
 
 impl Client {
-    /// Builds a client for `socket`.
+    /// Builds a client for an endpoint.
     ///
     /// # Errors
     ///
     /// Returns [`ClientError::Transport`] when the HTTP client cannot be built.
-    pub fn new(socket: impl Into<PathBuf>) -> Result<Self, ClientError> {
-        let socket = socket.into();
-        let http = reqwest::Client::builder()
+    pub fn new(endpoint: Endpoint) -> Result<Self, ClientError> {
+        let builder = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            // Told explicitly rather than left to the system's proxy settings: an
+            // administrative connection to a specific agent must not be silently
+            // routed through whatever proxy the environment happens to configure,
+            // which would send a local socket request somewhere else entirely.
+            .no_proxy();
+
+        let builder = match &endpoint {
             // The socket is the transport; the URL host is a placeholder that
             // never resolves.
-            .unix_socket(socket.clone())
-            .timeout(REQUEST_TIMEOUT)
+            Endpoint::Socket(path) => builder.unix_socket(path.clone()),
+            Endpoint::Remote { .. } => builder,
+        };
+
+        let http = builder
             .build()
             .map_err(|e| ClientError::Transport(e.to_string()))?;
-        Ok(Self { socket, http })
+        Ok(Self { endpoint, http })
     }
 
-    /// The socket this client talks to.
+    /// The endpoint this client talks to.
     #[must_use]
-    pub fn socket(&self) -> &Path {
-        &self.socket
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// The socket path, when this client uses one.
+    #[must_use]
+    pub fn socket(&self) -> Option<&Path> {
+        match &self.endpoint {
+            Endpoint::Socket(path) => Some(path),
+            Endpoint::Remote { .. } => None,
+        }
+    }
+
+    /// The full URL for a request path.
+    ///
+    /// One place builds this, so the socket's placeholder host and a remote base
+    /// URL cannot drift apart.
+    fn url(&self, path: &str) -> String {
+        match &self.endpoint {
+            Endpoint::Socket(_) => format!("http://localhost{path}"),
+            Endpoint::Remote { base_url, .. } => format!("{base_url}{path}"),
+        }
+    }
+
+    /// Applies the credential this endpoint requires.
+    ///
+    /// A socket needs none: the agent's file permissions are the boundary, and a
+    /// caller that opened the socket has already satisfied them. A remote endpoint
+    /// always needs one, which `resolve` has already guaranteed exists.
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.endpoint {
+            Endpoint::Socket(_) => request,
+            Endpoint::Remote { token, .. } => request.bearer_auth(token),
+        }
+    }
+
+    /// The label used in connection-failure messages.
+    fn label(&self) -> String {
+        self.endpoint.describe()
     }
 
     /// Opens a streaming response, delivering the body one line at a time.
@@ -182,24 +231,34 @@ impl Client {
     /// Returns [`ClientError::Unreachable`] when the socket cannot be connected,
     /// and [`ClientError::Transport`] when the response head is unusable.
     pub async fn stream(&self, path: &str) -> Result<LineStream, ClientError> {
-        let http = reqwest::Client::builder()
-            .unix_socket(self.socket.clone())
+        let builder = reqwest::Client::builder()
             // Only the connection attempt is bounded. A total timeout would kill
             // the body, which for this endpoint is the entire point of the
             // request.
             .connect_timeout(STREAM_OPEN_TIMEOUT)
+            .no_proxy();
+        let builder = match &self.endpoint {
+            Endpoint::Socket(path) => builder.unix_socket(path.clone()),
+            Endpoint::Remote { .. } => builder,
+        };
+        let http = builder
             .build()
             .map_err(|e| ClientError::Transport(e.to_string()))?;
 
-        let url = format!("http://localhost{path}");
-        let response = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ClientError::Unreachable {
-                socket: self.socket.display().to_string(),
-                reason: describe_connect_error(&e),
-            })?;
+        let url = self.url(path);
+        // The credential is applied here too. This path builds its own client —
+        // it needs different timeout behaviour — and forgetting the token here
+        // would make every stream fail on a remote agent while every other command
+        // worked, which is exactly the kind of split that hides until someone tries
+        // the one command nobody tested.
+        let response =
+            self.authorize(http.get(&url))
+                .send()
+                .await
+                .map_err(|e| ClientError::Unreachable {
+                    socket: self.label(),
+                    reason: describe_connect_error(&e),
+                })?;
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -222,6 +281,65 @@ impl Client {
         })
     }
 
+    /// Reports what this client is connected to, for diagnostics.
+    ///
+    /// # Why the role matters
+    ///
+    /// The most common remote failure is a token that works for some commands and
+    /// not others, and nothing in the CLI currently reports the role a token
+    /// carries. `doctor` prints this so the answer is available before someone
+    /// discovers it through a `403`.
+    ///
+    /// The role is read from a `system` call rather than decoded from the token:
+    /// tokens are opaque, and a client that could read its own privileges without
+    /// asking the agent would be one that could disagree with it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the agent cannot be reached or refuses. A
+    /// refusal is the interesting case, so it is reported rather than swallowed.
+    pub async fn connection_report(&self) -> Result<String, ClientError> {
+        let mut text = format!("endpoint   {}", self.endpoint.describe());
+        text.push_str(match &self.endpoint {
+            Endpoint::Socket(_) => "\nsource     unix socket (local)",
+            Endpoint::Remote { .. } => "\nsource     tcp with a bearer token",
+        });
+
+        // The probe is the one call whose failure explains the endpoint. A plain
+        // `system` is used rather than a dedicated health route: it exists, it is
+        // cheap, and it exercises the same authorization every other command does.
+        let response = self
+            .send("GET", &format!("{API_PREFIX}/system"), None)
+            .await?;
+        if !response.is_success() {
+            return Ok(format!(
+                "{text}\nreachable  no (status {})",
+                response.status
+            ));
+        }
+        text.push_str("\nreachable  yes");
+
+        // The instance name is the useful part of a successful probe: it confirms
+        // the agent answering is the one intended, which matters when several are
+        // reachable.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.body)
+            && let Some(environment) = value.get("environment")
+        {
+            text.push_str(&format!(
+                "\nplatform   {} {}",
+                environment
+                    .get("os")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-"),
+                environment
+                    .get("arch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+            ));
+        }
+        Ok(text)
+    }
+
     /// Sends a request.
     ///
     /// # Errors
@@ -234,7 +352,7 @@ impl Client {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<Response, ClientError> {
-        let url = format!("http://localhost{path}");
+        let url = self.url(path);
         let mut request = match method {
             "GET" => self.http.get(&url),
             "POST" => self.http.post(&url),
@@ -247,6 +365,8 @@ impl Client {
             }
         };
 
+        request = self.authorize(request);
+
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -255,7 +375,7 @@ impl Client {
             // A connection failure is reported as unreachable rather than as a
             // generic transport error, because that is the actionable distinction.
             ClientError::Unreachable {
-                socket: self.socket.display().to_string(),
+                socket: self.label(),
                 reason: describe_connect_error(&e),
             }
         })?;
@@ -423,8 +543,14 @@ mod tests {
     /// yet, and failing here would make `--help` depend on a running agent.
     #[test]
     fn a_client_can_be_built_for_a_socket_that_does_not_exist() {
-        let client = Client::new("/tmp/definitely-not-a-socket").expect("build");
-        assert_eq!(client.socket(), Path::new("/tmp/definitely-not-a-socket"));
+        let client = Client::new(Endpoint::Socket(PathBuf::from(
+            "/tmp/definitely-not-a-socket",
+        )))
+        .expect("build");
+        assert_eq!(
+            client.socket(),
+            Some(Path::new("/tmp/definitely-not-a-socket"))
+        );
     }
 
     /// A stream must outlive the connect timeout.
@@ -447,7 +573,10 @@ mod tests {
 
     #[tokio::test]
     async fn connecting_to_a_missing_socket_is_unreachable() {
-        let client = Client::new("/tmp/definitely-not-a-socket").expect("build");
+        let client = Client::new(Endpoint::Socket(PathBuf::from(
+            "/tmp/definitely-not-a-socket",
+        )))
+        .expect("build");
         let err = client
             .send("GET", "/api/v1/health", None)
             .await

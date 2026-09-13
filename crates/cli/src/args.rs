@@ -28,6 +28,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// The bearer token for a remote agent.
+    ///
+    /// Only needed when `--socket` names a URL. A token can also come from
+    /// `PROXYCTL_TOKEN`, which is the better choice in a script: an argument is
+    /// visible in the process list to every user on the machine.
+    #[arg(long, global = true, value_name = "TOKEN")]
+    pub token: Option<String>,
+
     /// The subcommand.
     #[command(subcommand)]
     pub command: TopCommand,

@@ -145,6 +145,46 @@ proxyctl agent run      守护进程：组装 context，服务 socket
 数据库访问放在 `proxy-bootstrap`（组合根），因为 CLI 客户端那半边**不允许**依赖 storage 适配器——
 架构测试强制这一点。
 
+### D10：客户端支持 socket 与 TCP（2026-09-12）
+
+**一个 `--socket`，按值判别。** 含 `://` 即视为 URL，否则视为 socket 路径：
+
+```text
+proxyctl --socket /run/proxy-agent/agent.sock status          # 本地，默认
+proxyctl --socket http://host:8765 --token <T> status         # 远程
+```
+
+复用同一个 flag 而非新增 `--server`：用户只记一个「连到哪里」，
+且脚本改一个值就能在本地/远程之间切换。缺点是 `--socket http://...` 读起来别扭，
+但两个 flag 的代价是每个操作员都得知道该用哪个。
+
+**`Endpoint` 是两个变体，不是两个可选字段。** `Socket` 一定没有 token（文件权限已是边界），
+`Remote` 一定需要。两个 `Option` 会允许「有 URL 也有 socket」「有 URL 没 token」这类组合，
+每一种都要在运行时检查；类型让它们无法构造。
+
+**缺 token 在解析时拒绝（退出码 2），不发出等 401。** 401 的意思是「凭据不对」，
+而这里是「没有提供凭据」，两者的修复动作不同，混在一起会让操作员跑错方向。
+
+**token 来源**：`--token` > `PROXYCTL_TOKEN`。**不做客户端配置文件**——
+token 落盘就会被备份、被贴进 issue，而客户端放 token 到磁盘只是图省事，
+没有 agent 侧那种必要性（agent 需要 loopback controller 的 secret）。
+
+**明文 HTTP 警告而非硬拒**，与 agent 侧对 off-host bind 的处理对称。
+loopback 静默（流量不经网络），`https://` 静默。硬拒会挡住 VPN 用户，
+而工具无法判断他们的网络路径是否已受保护。
+`https://` **技术上现在就能用**（`reqwest` 已带 `rustls-tls`），配反代即可。
+
+**401/403 给出可操作的提示**：401 提示 token 未被接受（未签发/已撤销/未带），
+403 提示角色不足（只有 `admin` 能写）。远程场景最常见的失败就是这两种，
+只回状态码等于让操作员自己猜。
+
+**`doctor` 报告连接**：endpoint、传输类型、可达性、平台。这是远程部署的第一个问题，
+且**agent 自己回答不了**（不可达时它什么也不回），所以由客户端先行打印。
+
+**一处易漏点已覆盖**：`stream()` 自己构建 client（需要不同的超时行为），
+token 在那里也必须带上——否则远程 agent 上「除流式命令外全部可用」，
+而那是只有试过那条命令才会发现的裂缝。
+
 ## Alternatives
 
 ### A1：两个二进制（`proxyctl` + `proxy-agent`）

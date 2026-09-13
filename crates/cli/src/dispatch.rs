@@ -10,7 +10,7 @@ use crate::args::{
 };
 use crate::command::{self, Command, Format};
 use crate::exit::Exit;
-use crate::{agent, client, runtime};
+use crate::{agent, client, endpoint, runtime};
 
 /// Dispatches a parsed command line.
 ///
@@ -59,14 +59,14 @@ pub async fn run(cli: Cli) -> Exit {
     // modelled as a `Command`. See `command::Logs` for why it does not fit the
     // trait that every other command implements.
     if let TopCommand::Logs(args) = &cli.command {
-        return stream_logs(&cli.socket, args, format).await;
+        return stream_logs(&cli.socket, &cli.token, args, format).await;
     }
 
     // The event stream is followed the same way the log stream is: it has no
     // single response to render, so it is driven here rather than modelled as a
     // `Command`.
     if let TopCommand::Events(args) = &cli.command {
-        return stream_events(&cli.socket, args, format).await;
+        return stream_events(&cli.socket, &cli.token, args, format).await;
     }
 
     // Token commands open the database directly rather than going over the socket:
@@ -107,14 +107,19 @@ pub async fn run(cli: Cli) -> Exit {
         return Exit::Usage;
     };
 
-    let socket = client::resolve_socket(cli.socket.as_deref());
-    let client = match client::Client::new(socket) {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("proxyctl: {e}");
-            return e.exit_code();
-        }
+    let Some(client) = connect(&cli.socket, &cli.token) else {
+        return Exit::Usage;
     };
+
+    // `doctor` answers "can I reach this agent", which is the first question of a
+    // remote deployment and one the agent itself cannot answer: an unreachable
+    // agent replies with nothing. The report goes first, so it is visible even when
+    // the request that follows fails.
+    if matches!(cli.command, TopCommand::Doctor)
+        && let Ok(report) = client.connection_report().await
+    {
+        println!("{report}\n");
+    }
 
     let request = command.request();
     let response = match client
@@ -130,6 +135,20 @@ pub async fn run(cli: Cli) -> Exit {
 
     if !response.is_success() {
         eprintln!("proxyctl: {}", command.render_error(&response));
+        // A 401 and a 403 are the two failures a remote caller hits most, and the
+        // status alone does not distinguish them in a way an operator can act on:
+        // one means the token is not accepted at all, the other that it is accepted
+        // and insufficient. Saying which is which points at the fix.
+        match response.status {
+            401 => eprintln!(
+                "proxyctl: the token was not accepted. Check that it was copied whole, that it has                  not been revoked, and that it is being sent with --token or {}. A fresh one can be                  issued with `proxyctl token issue` on the agent host.",
+                crate::endpoint::TOKEN_ENV
+            ),
+            403 => eprintln!(
+                "proxyctl: the token is valid but its role does not permit this. Only an `admin`                  token may change state; a `read-only` one may read."
+            ),
+            _ => {}
+        }
         return Exit::from_status(response.status);
     }
 
@@ -154,6 +173,37 @@ pub async fn run(cli: Cli) -> Exit {
     }
 }
 
+/// Builds a client from the global options, printing and explaining any refusal.
+///
+/// Returns `None` when the endpoint could not be resolved, after reporting why.
+/// The three commands that need a client all go through this, so a change to how
+/// an endpoint is resolved or authorized cannot reach two of them and miss the
+/// third.
+fn connect(socket: &Option<std::path::PathBuf>, token: &Option<String>) -> Option<client::Client> {
+    let endpoint = match endpoint::resolve(socket.as_deref(), token.as_deref()) {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            eprintln!("proxyctl: {}", e.message());
+            return None;
+        }
+    };
+
+    // A token sent in the clear off this machine is worth saying out loud, every
+    // time: it is legal, it works, and it is exactly the arrangement an operator
+    // forgets they have.
+    if let Some(warning) = endpoint::plaintext_warning(&endpoint) {
+        eprintln!("proxyctl: warning: {warning}");
+    }
+
+    match client::Client::new(endpoint) {
+        Ok(client) => Some(client),
+        Err(e) => {
+            eprintln!("proxyctl: {e}");
+            None
+        }
+    }
+}
+
 /// Streams the kernel's logs to standard output.
 ///
 /// # `-f` semantics
@@ -167,19 +217,19 @@ pub async fn run(cli: Cli) -> Exit {
 /// The command ends when the stream ends (the agent went away, or the kernel
 /// restarted) or when the caller interrupts it. An interrupted stream is a normal
 /// way to stop, so it is not an error.
-async fn stream_logs(socket: &Option<std::path::PathBuf>, args: &LogsArgs, format: Format) -> Exit {
+async fn stream_logs(
+    socket: &Option<std::path::PathBuf>,
+    token: &Option<String>,
+    args: &LogsArgs,
+    format: Format,
+) -> Exit {
     let path = command::Logs {
         level: args.level.clone(),
     }
     .path();
 
-    let socket = client::resolve_socket(socket.as_deref());
-    let client = match client::Client::new(socket) {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("proxyctl: {e}");
-            return e.exit_code();
-        }
+    let Some(client) = connect(socket, token) else {
+        return Exit::Usage;
     };
 
     let mut stream = match client.stream(&path).await {
@@ -241,16 +291,12 @@ async fn stream_logs(socket: &Option<std::path::PathBuf>, args: &LogsArgs, forma
 /// exactly one event and an exit code that says whether one arrived.
 async fn stream_events(
     socket: &Option<std::path::PathBuf>,
+    token: &Option<String>,
     args: &EventsArgs,
     format: Format,
 ) -> Exit {
-    let socket = client::resolve_socket(socket.as_deref());
-    let client = match client::Client::new(socket) {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("proxyctl: {e}");
-            return e.exit_code();
-        }
+    let Some(client) = connect(socket, token) else {
+        return Exit::Usage;
     };
 
     // The path carries no version prefix: it is fixed by the design document, and

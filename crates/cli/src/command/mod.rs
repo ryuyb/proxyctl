@@ -65,11 +65,11 @@ impl Request {
 
 /// The `/api/v1` prefix.
 ///
-/// Repeated here rather than imported from the interfaces crate: the client half
-/// of the binary must not link the server half, and an architecture test enforces
-/// it. A test asserts this string equals the server's own prefix, so the two
-/// cannot drift silently.
-pub const API_PREFIX: &str = "/api/v1";
+/// Re-exported from [`crate::endpoint`], where it is defined: that module builds
+/// request URLs and sits below this one, so a transport can name the prefix
+/// without reaching upward. Kept as a re-export so existing call sites here read
+/// the same as before.
+pub use crate::endpoint::API_PREFIX;
 
 /// One command's behaviour.
 pub trait Command {

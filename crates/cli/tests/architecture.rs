@@ -222,8 +222,10 @@ fn the_client_prefix_equals_the_servers_prefix() {
         .map(|value| value.trim().trim_matches('"').to_owned())
         .expect("the server must declare API_PREFIX");
 
-    let client = std::fs::read_to_string(crate_root().join("src/command/mod.rs"))
-        .expect("the command module must be readable");
+    // The prefix is defined in `endpoint`, which sits below `command` so a
+    // transport can name it without reaching upward. This follows it there.
+    let client = std::fs::read_to_string(crate_root().join("src/endpoint.rs"))
+        .expect("the endpoint module must be readable");
     let actual = client
         .lines()
         .find_map(|line| {
