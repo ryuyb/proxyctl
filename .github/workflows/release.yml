@@ -138,10 +138,22 @@ jobs:
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
-          # Pre-release until the project says otherwise: the deb, the install
-          # script, and the kernel acquisition path are not all done, and a
-          # release marked "latest" would be fetched by the install script.
-          prerelease: true
+          # A release, not a pre-release.
+          #
+          # This was `true` at first, on the reasoning that the project is not
+          # finished. That reasoning was backwards: GitHub's `releases/latest`
+          # endpoint **skips pre-releases**, so every pre-release is invisible to
+          # the install script — and the script's own no-release path tells the
+          # reader to build from source. The result was a one-command install that
+          # could not work for anyone, which is worse than shipping something
+          # incomplete.
+          #
+          # A tag here is deliberate: cutting one is the act of saying "this is
+          # what people should get". For a genuinely experimental build, mark it
+          # as a pre-release in the GitHub UI, or push a tag like `v0.2.0-rc.1` —
+          # but do not make pre-release the default, because the default is what
+          # the install script fetches.
+          prerelease: false
           generate_release_notes: true
           files: |
             dist/*.tar.gz

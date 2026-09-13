@@ -160,14 +160,39 @@ if [ -z "$VERSION" ]; then
   case "$http" in
     200) json="$(cat /tmp/proxyctl-release.$$ 2>/dev/null || true)" ;;
     404)
-      # The repository exists but has published no release. This is the state a
-      # project is in before its first tag, and saying "cannot reach GitHub"
-      # would send the reader looking at their network.
+      # `releases/latest` answers 404 in two different situations, and the two
+      # need different advice:
+      #
+      #   * nothing has been released at all;
+      #   * releases exist, but every one is marked a **pre-release**, which
+      #     `latest` skips by definition.
+      #
+      # The second is the trap. It happened here: the only release was a
+      # pre-release, so this path told a reader to build from source while a
+      # working artifact sat one URL away. Looking for a pre-release before
+      # giving up costs one request and turns a dead end into an install.
       rm -f /tmp/proxyctl-release.$$
-      die "this repository has no published release yet.
+      listing="$(curl -sSL --max-time 30 \
+        "https://api.github.com/repos/${REPO}/releases?per_page=1" 2>/dev/null || true)"
+      # A JSON array with a non-null `tag_name` means a release exists. Matched
+      # with `sed` rather than parsed, because the only fields needed are the tag
+      # and whether the array was empty.
+      fallback="$(printf '%s' "$listing" \
+        | sed -n 's/.*"tag_name" *: *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+
+      if [ -n "$fallback" ]; then
+        warn "no *latest* release: every release is marked a pre-release."
+        warn "Installing ${fallback} from the most recent one."
+        warn "Pass --version to choose a different one, or check the release page:"
+        warn "  https://github.com/${REPO}/releases"
+        VERSION="$fallback"
+        SKIP_LOOKUP=1
+      else
+        die "this repository has no published release yet.
      Build from source instead:
        git clone https://github.com/${REPO} && cd proxyctl
-       cargo build --release -p proxyctl" ;;
+       cargo build --release -p proxyctl"
+      fi ;;
     000)
       rm -f /tmp/proxyctl-release.$$
       die "could not reach the GitHub API.
@@ -180,8 +205,11 @@ if [ -z "$VERSION" ]; then
   esac
   rm -f /tmp/proxyctl-release.$$
 
-  VERSION="$(printf '%s' "$json" | sed -n 's/.*"tag_name" *: *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
-  [ -n "$VERSION" ] || die "the latest release has no tag name; pass --version to name one."
+  # Set by the pre-release fallback above, which has already chosen a version.
+  if [ "${SKIP_LOOKUP:-0}" -eq 0 ]; then
+    VERSION="$(printf '%s' "$json" | sed -n 's/.*"tag_name" *: *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "$VERSION" ] || die "the latest release has no tag name; pass --version to name one."
+  fi
 fi
 
 VERSION="${VERSION#v}"
