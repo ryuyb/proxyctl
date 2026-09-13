@@ -173,6 +173,17 @@ place than not starting it at all:
 The unit exists for exactly this reason: it names the user, creates the runtime
 directory with the right mode, and grants only `CAP_NET_ADMIN`.
 
+If `systemctl start` fails with **"Access denied … requires interactive
+authentication"**, that is polkit, not your password. `systemctl` asks polkit for
+`manage-units`, whose default is `auth_admin` — an interactive prompt — and a
+non-interactive session has no prompt to show it. This is common over SSH, where
+no polkit agent is registered for the session. Use `sudo`, which does not go
+through polkit at all:
+
+```bash
+sudo systemctl start proxy-agent
+```
+
 ### Who can use it
 
 The agent socket is mode `0666`: **any local user can reach it**, and the agent

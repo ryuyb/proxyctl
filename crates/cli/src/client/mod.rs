@@ -484,23 +484,40 @@ fn describe_connect_error(error: &reqwest::Error) -> String {
     }
 
     if error.is_connect() {
-        return match underlying_errno(error) {
-            // Reachable but refused: the deployment narrowed the socket on purpose.
-            Some(13) => "permission denied opening the agent socket. The socket is \
-                 not open to this user, which means the deployment configured a \
-                 peer uid/gid check or narrowed its mode. Check the agent's \
-                 authentication settings"
-                .to_owned(),
-            // No such file: the path is wrong, or nothing ever listened there.
-            Some(2) => "the socket does not exist; is the agent running?".to_owned(),
-            // There is a file, but no process is listening on it — which is what
-            // an agent that exited leaves behind.
-            Some(111) => "nothing is listening on the socket; is the agent running?".to_owned(),
-            _ => "the socket refused the connection; is the agent running?".to_owned(),
-        };
+        return describe_errno(underlying_errno(error));
     }
 
     error.to_string()
+}
+
+/// The advice for one connection errno, or `None` when there is no OS code.
+///
+/// Split out from [`describe_connect_error`] so the wording can be asserted
+/// directly: the whole point of classifying by errno is that each case names a
+/// *different* remedy, and a test that only exercises the walk would not notice
+/// two cases collapsing into the same sentence.
+fn describe_errno(errno: Option<i32>) -> String {
+    match errno {
+        // Reachable but refused: the deployment narrowed the socket on purpose.
+        Some(13) => "permission denied opening the agent socket. The socket is \
+                 not open to this user, which means the deployment configured a \
+                 peer uid/gid check or narrowed its mode. Check the agent's \
+                 authentication settings"
+            .to_owned(),
+        // No such file: the agent has never run, or the path is wrong.
+        Some(2) => "the socket does not exist, so the agent has not been started. \
+                 Start the service with `sudo systemctl start proxy-agent` rather than \
+                 running the binary by hand (see the README, \"Start the service, not \
+                 the binary\"). If the agent is running, check that this command and the \
+                 agent agree on [agent] socket"
+            .to_owned(),
+        // There is a file, but no process is listening on it — which is what
+        // an agent that exited leaves behind.
+        Some(111) => "nothing is listening on the socket, so the agent exited after \
+                 creating it. Check `systemctl status proxy-agent`"
+            .to_owned(),
+        _ => "the socket refused the connection; is the agent running?".to_owned(),
+    }
 }
 
 /// The OS error code at the bottom of an error's cause chain.
@@ -524,6 +541,51 @@ fn underlying_errno(error: &reqwest::Error) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each errno names a different remedy, which is the whole point of
+    /// classifying by it. Asserted individually so a case that collapsed into the
+    /// generic sentence is caught here rather than by an operator following advice
+    /// that does not apply.
+    #[test]
+    fn each_errno_names_its_own_remedy() {
+        // Missing socket: the agent was never started, so start the service.
+        let missing = describe_errno(Some(2));
+        assert!(missing.contains("has not been started"), "{missing}");
+        assert!(missing.contains("systemctl start proxy-agent"), "{missing}");
+
+        // A file with no listener: the agent exited, so look at its status.
+        let refused = describe_errno(Some(111));
+        assert!(refused.contains("exited"), "{refused}");
+        assert!(
+            refused.contains("systemctl status proxy-agent"),
+            "{refused}"
+        );
+
+        // Reachable but not open to us: a deliberate deployment choice.
+        let denied = describe_errno(Some(13));
+        assert!(denied.contains("not open to this user"), "{denied}");
+
+        // The three must not share a sentence, or the classification is pointless.
+        assert_ne!(missing, refused);
+        assert_ne!(missing, denied);
+        assert_ne!(refused, denied);
+    }
+
+    /// An errno we do not classify falls back to a generic sentence rather than
+    /// claiming a remedy that may not apply.
+    #[test]
+    fn an_unclassified_errno_falls_back_without_guessing() {
+        let other = describe_errno(Some(42));
+        assert!(other.contains("refused the connection"), "{other}");
+        assert!(!other.contains("systemctl"), "{other}");
+    }
+
+    /// A failure that never reached the OS has no errno to classify, so the
+    /// generic sentence is the honest answer.
+    #[test]
+    fn no_errno_yields_the_generic_sentence() {
+        assert_eq!(describe_errno(None), describe_errno(Some(42)));
+    }
 
     /// A connection failure that never reached the OS yields no errno.
     ///

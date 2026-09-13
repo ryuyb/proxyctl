@@ -147,6 +147,12 @@ sudo systemctl start proxy-agent
 
 unit 存在的理由就是这个：它指定了用户、用正确的权限创建运行目录、并且只授予 `CAP_NET_ADMIN`。
 
+如果 `systemctl start` 报 **"Access denied … requires interactive authentication"**，那是 polkit，不是你的密码错了。`systemctl` 会向 polkit 申请 `manage-units`，其默认策略是 `auth_admin`（交互式认证），而非交互式会话没有可以弹出提示的地方。SSH 下很常见 —— 该会话没有注册 polkit agent。用 `sudo` 即可，它根本不经过 polkit：
+
+```bash
+sudo systemctl start proxy-agent
+```
+
 ### 谁能用
 
 agent socket 的权限是 `0666`：**本机任何用户都能连上它**，而且 agent 自己做调用方认证，不把文件权限当作边界。这是刻意的 —— 目标是客户端开箱可用，不需要把谁加进某个专用组。

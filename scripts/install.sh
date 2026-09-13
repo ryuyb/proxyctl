@@ -435,7 +435,7 @@ if [ "${HAVE_SYSTEMD:-1}" -eq 1 ]; then
       warn "  ln -s ${UNIT_DIR}/proxy-agent.service /etc/systemd/system/proxy-agent.service"
       warn "  systemctl daemon-reload && systemctl enable proxy-agent"
     else
-      warn "Start it manually with: systemctl start proxy-agent"
+      warn "Start it manually with: sudo systemctl start proxy-agent"
     fi
   fi
 fi
@@ -458,10 +458,14 @@ info ""
 info "${C_BOLD}Next:${C_RESET}"
 info ""
 info "  1. Review ${CONFIG}, then start the agent:"
-info "       ${C_DIM}systemctl start proxy-agent${C_RESET}"
-info "     Do not run \`sudo proxyctl agent run\` instead. It creates the socket as"
-info "     root, leaves it unmanageable by systemd, and refuses the very user the"
-info "     service runs as — so every later command fails while an agent is up."
+info "       ${C_DIM}sudo systemctl start proxy-agent${C_RESET}"
+info "     ${C_DIM}sudo${C_RESET} is not decoration: plain ${C_DIM}systemctl${C_RESET} goes through polkit, whose"
+info "     default for manage-units is interactive authentication. Over SSH there"
+info "     is no polkit agent to prompt, so it fails with \"Access denied\"."
+info "     Do not run \`sudo proxyctl agent run\` instead. It appears to work — the"
+info "     socket is created and it prints that it is listening — but the process"
+info "     is in your terminal, so Ctrl-C leaves a socket with no listener, and"
+info "     \`systemctl\` can neither see nor restart it."
 info ""
 info "  2. Install a Mihomo kernel — this installer deliberately does not."
 info "     The version is required: the agent verifies the checksum, and picking"
