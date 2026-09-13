@@ -266,7 +266,8 @@ proxyctl config activate ID     # switch a running kernel, with rollback
 proxyctl config rollback ID     # back to a version that worked
 
 proxyctl subscription list
-proxyctl subscription update NAME
+proxyctl subscription add NAME URL   # register it; fetches nothing yet
+proxyctl subscription update NAME    # fetch, convert and activate
 
 proxyctl connections            # live connections, including process details
 proxyctl logs -f                # follow the kernel's log
@@ -346,6 +347,30 @@ proxyctl agent run --print-config
 
 Every path is configurable, and nothing hard-codes the packaged defaults. The
 three directories come from `[paths]`, and the socket from `[agent] socket`.
+
+---
+
+## Subscriptions
+
+A subscription is registered first and fetched later, and the two steps are
+separate on purpose: registering only records where to fetch from, so it succeeds
+even when the provider or the converter is unreachable.
+
+```bash
+proxyctl subscription add airport https://provider.example/sub?token=...
+proxyctl subscription update airport      # fetch, convert, validate, activate
+```
+
+Adding is idempotent by name — the name *is* the identifier — so adding an
+existing one replaces where it fetches from rather than creating a second.
+
+**The URL is never printed back**, by `add` or by `list`. A subscription URL is a
+credential in everything but name: it usually embeds a token, and holding it is
+holding the subscription. Both commands report the name instead, which is what
+addressing a later command actually needs.
+
+`--schedule SECONDS` refreshes automatically; without it, a subscription is
+fetched only when `update` is run.
 
 ---
 

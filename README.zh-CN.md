@@ -210,7 +210,8 @@ proxyctl config activate ID     # 切换正在运行的内核，失败可回滚
 proxyctl config rollback ID     # 回退到曾经可用的版本
 
 proxyctl subscription list
-proxyctl subscription update NAME
+proxyctl subscription add NAME URL   # 登记;此时不会拉取
+proxyctl subscription update NAME    # 拉取、转换并激活
 
 proxyctl connections            # 实时连接（管理员可见进程信息）
 proxyctl logs -f                # 跟随内核日志
@@ -275,6 +276,23 @@ proxyctl agent run --print-config
 ```
 
 **所有路径都可配置**，没有任何地方硬编码打包时的默认值。三个目录来自 `[paths]`，socket 来自 `[agent] socket`。
+
+---
+
+## 订阅
+
+订阅先登记、后拉取，两步分开是刻意的：登记只记录"从哪里拉"，所以即使提供商或转换器当时不可达也能成功。
+
+```bash
+proxyctl subscription add airport https://provider.example/sub?token=...
+proxyctl subscription update airport      # 拉取、转换、校验、激活
+```
+
+按名字添加是幂等的 —— 名字**就是**标识符 —— 所以对已存在的名字再 add 是替换拉取地址，而不是建第二个。
+
+**URL 永远不会被回显**，`add` 和 `list` 都不会。订阅 URL 本质上就是凭证：它通常内嵌 token，拿到它就等于拿到订阅。两条命令都只报名字，而后续命令寻址需要的也正是名字。
+
+`--schedule SECONDS` 会自动刷新；不加则只在运行 `update` 时拉取。
 
 ---
 

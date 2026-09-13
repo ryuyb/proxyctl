@@ -756,6 +756,73 @@ impl Command for SubscriptionList {
     }
 }
 
+/// `subscription add` — registers where to fetch a subscription from.
+///
+/// # Why the URL is not echoed
+///
+/// A subscription URL is a bearer credential in everything but name: paste it and
+/// you have the subscription. So the response is reported by name and identifier
+/// only, and the URL is never printed back — not on success, and not in an error
+/// that might quote what was sent. `subscription list` already omits it for the
+/// same reason.
+///
+/// The alternative — printing it so the operator can confirm what they typed —
+/// trades a real leak for a convenience that the shell already provides, since the
+/// command they just ran is in their history.
+#[derive(Debug, Clone)]
+pub struct SubscriptionAdd {
+    /// The name to address it by later.
+    pub name: String,
+    /// The URL to fetch from. Sent, never rendered.
+    pub url: String,
+    /// The User-Agent to send, when a provider requires one.
+    pub user_agent: Option<String>,
+    /// How often to refresh, in seconds.
+    pub schedule: Option<u64>,
+}
+
+impl Command for SubscriptionAdd {
+    fn request(&self) -> Request {
+        // Only the fields that were given are sent: an explicit `null` schedule
+        // would have to mean "no schedule", and the API already treats an absent
+        // field that way. Sending fewer keys means one less thing to keep in step.
+        let mut body = json!({
+            "name": self.name,
+            "url": self.url,
+        });
+        if let Some(agent) = &self.user_agent {
+            body["user_agent"] = json!(agent);
+        }
+        if let Some(seconds) = self.schedule {
+            body["schedule_seconds"] = json!(seconds);
+        }
+
+        Request::with_body("POST", format!("{API_PREFIX}/subscriptions"), body)
+    }
+
+    fn render(&self, response: &Response) -> Result<String, Exit> {
+        let value = as_object(&response.body)?;
+        let id = field(&value, "id");
+
+        // The name and the identifier, and nothing that could authenticate. The
+        // schedule is reported because it is the part a caller most easily gets
+        // wrong and the part that is invisible afterwards without another command.
+        // Only the identifier, because it *is* the name: the endpoint derives both
+        // from the name field, so printing each would say one thing twice under two
+        // labels. If that ever changes, this becomes wrong rather than merely
+        // redundant, which is why it is noted here.
+        Ok(match self.schedule {
+            Some(seconds) => format!(
+                "added {id}\n  refresh every {seconds}s\n  fetch it now with \
+                 `proxyctl subscription update {id}`"
+            ),
+            None => format!(
+                "added {id}\n  no schedule: fetch it with `proxyctl subscription update {id}`"
+            ),
+        })
+    }
+}
+
 /// `subscription update` — runs a conversion and activates the result.
 #[derive(Debug, Clone)]
 pub struct SubscriptionUpdate {
@@ -1603,6 +1670,108 @@ mod tests {
             .expect("render");
         assert!(!text.contains("SECRET"), "the URL leaked: {text}");
         assert!(text.contains("airport"), "{text}");
+    }
+
+    /// The other half of the no-leak rule: `add` must not print the URL either.
+    ///
+    /// A subscription URL is a credential — holding it is holding the subscription —
+    /// and `add` is the command whose output most easily ends up in an issue, since
+    /// it is the one an operator runs while setting things up.
+    #[test]
+    fn adding_a_subscription_does_not_print_the_url() {
+        // Both branches, because they are separate format strings and a leak in one
+        // is not a leak in the other — which is exactly how this assertion first
+        // passed against code that printed the URL whenever a schedule was set.
+        for schedule in [None, Some(3600)] {
+            let command = SubscriptionAdd {
+                name: "mine".into(),
+                url: "https://provider.invalid/sub?token=SECRET".into(),
+                user_agent: None,
+                schedule,
+            };
+            let text = command
+                .render(&ok(json!({ "id": "mine" })))
+                .expect("render");
+
+            assert!(!text.contains("SECRET"), "the token leaked: {text}");
+            assert!(!text.contains("provider.invalid"), "the URL leaked: {text}");
+            assert!(text.contains("mine"), "{text}");
+        }
+    }
+
+    /// The URL must reach the request, or nothing would be fetched. Proving it is
+    /// absent from the output is only meaningful if it is present in the body.
+    #[test]
+    fn adding_a_subscription_sends_its_url() {
+        let command = SubscriptionAdd {
+            name: "mine".into(),
+            url: "https://example.invalid/sub".into(),
+            user_agent: None,
+            schedule: None,
+        };
+
+        let request = command.request();
+        assert_eq!(request.method, "POST");
+        assert!(request.path.ends_with("/subscriptions"), "{}", request.path);
+        let sent = request.body.expect("a body");
+        assert_eq!(
+            sent.get("url").and_then(|v| v.as_str()),
+            Some("https://example.invalid/sub"),
+            "{sent}"
+        );
+    }
+
+    /// Options that were not given are omitted rather than sent as `null`, so the
+    /// API's own defaults decide what "not given" means.
+    #[test]
+    fn omitted_subscription_options_are_not_sent() {
+        let bare = SubscriptionAdd {
+            name: "a".into(),
+            url: "https://example.invalid/a".into(),
+            user_agent: None,
+            schedule: None,
+        };
+        let sent = bare.request().body.expect("a body");
+        assert!(sent.get("user_agent").is_none(), "{sent}");
+        assert!(sent.get("schedule_seconds").is_none(), "{sent}");
+
+        let full = SubscriptionAdd {
+            name: "a".into(),
+            url: "https://example.invalid/a".into(),
+            user_agent: Some("ua".into()),
+            schedule: Some(3600),
+        };
+        let sent = full.request().body.expect("a body");
+        assert_eq!(sent.get("user_agent").and_then(|v| v.as_str()), Some("ua"));
+        assert_eq!(
+            sent.get("schedule_seconds").and_then(|v| v.as_u64()),
+            Some(3600)
+        );
+    }
+
+    /// A schedule is reported, because it is invisible afterwards without another
+    /// command and is the part a caller most easily gets wrong.
+    #[test]
+    fn a_subscription_schedule_is_reported() {
+        let scheduled = SubscriptionAdd {
+            name: "s".into(),
+            url: "https://example.invalid/s".into(),
+            user_agent: None,
+            schedule: Some(900),
+        };
+        let text = scheduled.render(&ok(json!({ "id": "s" }))).expect("render");
+        assert!(text.contains("900"), "{text}");
+
+        let unscheduled = SubscriptionAdd {
+            name: "s".into(),
+            url: "https://example.invalid/s".into(),
+            user_agent: None,
+            schedule: None,
+        };
+        let text = unscheduled
+            .render(&ok(json!({ "id": "s" })))
+            .expect("render");
+        assert!(text.contains("no schedule"), "{text}");
     }
 
     #[test]

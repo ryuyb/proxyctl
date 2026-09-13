@@ -858,6 +858,7 @@ proxyctl mihomo version
 proxyctl mihomo update
 
 proxyctl subscription list
+proxyctl subscription add NAME URL
 proxyctl subscription update
 
 proxyctl config list

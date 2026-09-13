@@ -416,6 +416,12 @@ pub fn build(top: &TopCommand) -> Option<Box<dyn Command>> {
         TopCommand::Subscription(SubscriptionCommand::List(args)) => {
             Box::new(SubscriptionList { limit: args.limit })
         }
+        TopCommand::Subscription(SubscriptionCommand::Add(args)) => Box::new(SubscriptionAdd {
+            name: args.name.clone(),
+            url: args.url.clone(),
+            user_agent: args.user_agent.clone(),
+            schedule: args.schedule,
+        }),
         TopCommand::Subscription(SubscriptionCommand::Update(args)) => {
             Box::new(SubscriptionUpdate {
                 id: args.id.clone(),

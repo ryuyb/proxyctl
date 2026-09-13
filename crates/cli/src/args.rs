@@ -270,8 +270,41 @@ pub enum ConfigCommand {
 pub enum SubscriptionCommand {
     /// List subscriptions.
     List(ListArgs),
+    /// Add a subscription.
+    ///
+    /// Registers where to fetch it from. Nothing is fetched until
+    /// `subscription update`, so adding is safe to do before the converter is
+    /// reachable.
+    Add(SubscriptionAddArgs),
     /// Fetch, convert and activate a subscription.
     Update(IdArg),
+}
+
+/// A subscription to add.
+#[derive(Debug, Args)]
+pub struct SubscriptionAddArgs {
+    /// The name to address it by in later commands.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// The URL to fetch it from.
+    ///
+    /// The one value in this command that is not printed back: subscription URLs
+    /// routinely embed a token, and a command's output is the most likely thing to
+    /// be pasted into an issue.
+    #[arg(value_name = "URL")]
+    pub url: String,
+
+    /// The User-Agent to send, when the provider requires a particular one.
+    #[arg(long, value_name = "UA")]
+    pub user_agent: Option<String>,
+
+    /// How often to refresh it, in seconds.
+    ///
+    /// Omitted means no schedule: the subscription is fetched only when
+    /// `subscription update` is run.
+    #[arg(long, value_name = "SECONDS")]
+    pub schedule: Option<u64>,
 }
 
 /// A list limit.
