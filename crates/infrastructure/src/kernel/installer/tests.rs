@@ -107,6 +107,36 @@ fn fake_binary_banner() -> Vec<u8> {
     b"#!/bin/sh\necho \"Mihomo Meta v1.19.30 linux arm64\"\n".to_vec()
 }
 
+/// Writes an executable and guarantees the write is closed before it is run.
+///
+/// # Why this exists rather than a bare `write` + `chmod`
+///
+/// The installer probes an artifact by executing it, and on Linux `exec` fails with
+/// `ETXTBSY` ("Text file busy") when *any* process still holds that file open for
+/// writing. `tokio::fs::write` returns once the bytes are handed over, so a test
+/// that writes and immediately proceeds can race: the probe fires while the write
+/// side is still open, and the install fails with an error that says nothing about
+/// the real cause.
+///
+/// It is intermittent by nature — it needs the write handle to still be open when
+/// the probe runs — which is why it surfaced on a busy CI runner and never locally.
+/// Measured on CI: `the artifact at /tmp/.tmpRNSuCd/artifact is not executable:
+/// Text file busy (os error 26)`.
+///
+/// The write is done through a `std::fs::File` that is explicitly dropped, and
+/// `sync_all` is called first, so the descriptor is closed and the contents are on
+/// disk before the path is handed to anything that might execute it.
+fn write_executable(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write as _;
+
+    let mut file = std::fs::File::create(path).expect("create");
+    file.write_all(bytes).expect("write");
+    file.sync_all().expect("sync");
+    drop(file);
+
+    set_executable(path).expect("chmod");
+}
+
 fn release_json(asset: &str, digest: Option<&str>) -> String {
     let digest_field = match digest {
         Some(d) => format!(r#","digest":"{d}""#),
@@ -524,10 +554,7 @@ async fn install_refuses_a_non_executable_artifact() {
 async fn install_is_atomic_and_records_a_manifest() {
     let dir = tempfile::tempdir().expect("dir");
     let artifact_path = dir.path().join("artifact");
-    tokio::fs::write(&artifact_path, fake_binary_banner())
-        .await
-        .expect("write");
-    set_executable(&artifact_path).expect("chmod");
+    write_executable(&artifact_path, &fake_binary_banner());
 
     let target = dir.path().join("mihomo");
     let installer =
@@ -563,16 +590,10 @@ async fn install_is_atomic_and_records_a_manifest() {
 async fn install_retains_the_previous_binary() {
     let dir = tempfile::tempdir().expect("dir");
     let target = dir.path().join("mihomo");
-    tokio::fs::write(&target, b"#!/bin/sh\necho old\n")
-        .await
-        .expect("write");
-    set_executable(&target).expect("chmod");
+    write_executable(&target, b"#!/bin/sh\necho old\n");
 
     let artifact_path = dir.path().join("artifact");
-    tokio::fs::write(&artifact_path, fake_binary_banner())
-        .await
-        .expect("write");
-    set_executable(&artifact_path).expect("chmod");
+    write_executable(&artifact_path, &fake_binary_banner());
 
     let installer =
         GithubKernelInstaller::new(&target, dir.path().join("scratch")).expect("installer");
@@ -605,19 +626,13 @@ async fn rollback_restores_the_retained_binary() {
 
     // An "old" binary that reports a different version, so the restored one is
     // identifiable.
-    tokio::fs::write(
+    write_executable(
         &target,
         b"#!/bin/sh\necho \"Mihomo Meta v1.18.0 linux arm64\"\n",
-    )
-    .await
-    .expect("write");
-    set_executable(&target).expect("chmod");
+    );
 
     let artifact_path = dir.path().join("artifact");
-    tokio::fs::write(&artifact_path, fake_binary_banner())
-        .await
-        .expect("write");
-    set_executable(&artifact_path).expect("chmod");
+    write_executable(&artifact_path, &fake_binary_banner());
 
     let installer =
         GithubKernelInstaller::new(&target, dir.path().join("scratch")).expect("installer");
@@ -655,10 +670,7 @@ async fn rollback_restores_the_retained_binary() {
 async fn current_reports_the_binary_not_a_stale_manifest() {
     let dir = tempfile::tempdir().expect("dir");
     let target = dir.path().join("mihomo");
-    tokio::fs::write(&target, fake_binary_banner())
-        .await
-        .expect("write");
-    set_executable(&target).expect("chmod");
+    write_executable(&target, &fake_binary_banner());
 
     let installer =
         GithubKernelInstaller::new(&target, dir.path().join("scratch")).expect("installer");
