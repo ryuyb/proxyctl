@@ -22,7 +22,10 @@ Core architectural style:
 - Modular Monolith
 - Agent/Client separation
 
-The project is not intended to reimplement the Mihomo proxy core, a complete Sub-Store, or a complete Mihomo Dashboard.
+The project is not intended to reimplement the Mihomo proxy core, a complete
+Sub-Store, or a complete Mihomo Dashboard — the dashboard is **embedded as an
+upstream artifact** and served alongside this repository's own interface. Both are
+described under "Web Interfaces".
 
 ---
 
@@ -72,7 +75,7 @@ domain -> interfaces
 application -> infrastructure
 application -> axum
 application -> reqwest
-application -> sqlx
+application -> rusqlite
 application -> systemd
 application -> nftables
 
@@ -152,10 +155,11 @@ Interfaces are adapters.
 Examples:
 
 - REST API
-- WebSocket
+- streaming NDJSON endpoints (events, logs)
 - CLI
 - TUI
 - Web UI integration
+- same-origin Clash API relay for the embedded dashboard
 
 They must call Application use cases instead of implementing business logic themselves.
 
@@ -163,32 +167,52 @@ They must call Application use cases instead of implementing business logic them
 
 ## Repository Layout
 
-Preferred workspace:
+The actual workspace. `crates/` holds the Rust workspace; `proxyctl` is one
+binary with both a client and an agent role.
 
 ```text
-proxy-manager/
-├── Cargo.toml
+proxyctl/
+├── Cargo.toml                  workspace manifest
 ├── crates/
-│   ├── domain/
-│   ├── application/
-│   ├── infrastructure/
-│   ├── interfaces/
-│   └── bootstrap/
+│   ├── domain/                 pure rules; no I/O, no async runtime
+│   ├── application/            use cases and Ports
+│   ├── infrastructure/         Port implementations (SQLite, mihomo, systemd)
+│   ├── interfaces/             HTTP API, embedded UI, the Clash API relay
+│   ├── cli/                    proxyctl: client commands, TUI, agent role
+│   └── bootstrap/              composition root
 ├── frontend/
-│   ├── admin/
-│   └── metacubexd/
-├── migrations/
+│   ├── admin/                  this repository's operator interface (Vite + React)
+│   └── metacubexd/             the upstream dashboard artifact, fetched not built
 ├── packaging/
-│   ├── systemd/
-│   ├── deb/
-│   └── install.sh
-├── tests/
+│   ├── systemd/proxy-agent.service
+│   └── config.toml.example
+├── scripts/
+│   ├── fetch-metacubexd.sh     fetches the dashboard artifact
+│   └── gen-config-whitelist.py regenerates the mihomo field list from upstream
 ├── docs/
-│   ├── architecture.md
-│   ├── research/
+│   ├── design/                 per-feature design notes
+│   ├── research/               Phase 0 research
 │   └── adr/
 └── AGENTS.md
 ```
+
+**There is no `migrations/` or top-level `tests/`.** Both were in an earlier
+sketch, and neither is where the work ended up:
+
+* schema changes are versioned by `PRAGMA user_version` in
+  `crates/infrastructure/src/storage/schema.rs`, so there are no migration files
+  to keep in a directory. A future build reads that number to tell an old
+  database from a current one;
+* tests live beside what they test — unit tests in each crate, integration tests
+  in that crate's `tests/` — because a top-level `tests/` would need the whole
+  workspace as a dependency and would hide which crate a failure belongs to.
+
+`packaging/` holds the systemd unit and the documented configuration example. The
+deb and install script are planned, not yet written.
+
+`frontend/metacubexd/dist/` is build output and is not committed; run
+`scripts/fetch-metacubexd.sh` first. A `cargo build` without it succeeds and
+embeds a placeholder page.
 
 Do not reorganize the project into a different architecture without an ADR.
 
@@ -578,9 +602,46 @@ Treat socket filesystem permissions as part of the security model.
 
 ### Web authentication
 
-Local Unix socket access may rely on OS permissions.
+Two transports, two mechanisms, and one rule they share: **a failure to verify is
+a refusal, never a pass.**
 
-Web access should use authentication when remotely reachable.
+**Unix socket.** The socket's file permissions are the boundary (`0660`, inside a
+`0750` directory). The peer credential (`SO_PEERCRED`) is a *second* check and is
+off by default — deliberately, because LXC uid mapping can make a correct peer
+look wrong, and a check that locks an operator out of their own agent is worse
+than the risk it addresses. When a deployment does configure a uid or gid, a read
+failure is a refusal: allowing it would make the check bypassable by breaking the
+read.
+
+**TCP.** Over a network the token *is* the identity. A token is required, with
+**no loopback exemption** — loopback is not a trust boundary on a host that also
+runs untrusted software. Both transports serve at once; configuring a bind adds a
+listener, it does not replace the socket.
+
+**Browsers get a session cookie, not a token.** A page cannot safely hold a token:
+whatever a page holds is readable by any script running on it, and this interface
+renders operator-supplied content. Sign-in exchanges a token for an `HttpOnly`
+cookie the browser refuses to hand to JavaScript:
+
+```text
+HttpOnly; SameSite=Strict; Path=/; Max-Age=43200   (+ Secure only behind TLS)
+```
+
+There is deliberately **no CSRF token** — injecting one into the page would put a
+credential where a script can read it, which is the problem the design exists to
+avoid. `SameSite=Strict` plus a same-origin check on state-changing requests
+covers the same ground. The check runs **only on the cookie path**, not as a
+global middleware: a script holding a token sends no `Origin` and must not be
+refused for it.
+
+Tokens and session identifiers are stored as SHA-256 with a per-row salt, not
+Argon2 or bcrypt. Both are 256-bit random values, so there is no dictionary to
+attack, and a deliberately slow hash would tax every request. All credential
+comparisons are constant-time with no early exit.
+
+`Secure` is set only when TLS is actually terminating in front of the listener.
+Setting it unconditionally would make the cookie unusable on the loopback and
+private-network deployments this agent targets.
 
 Do not log:
 
@@ -751,6 +812,14 @@ Do not print secrets by default.
 
 Exit codes must distinguish success from operational failure.
 
+**A `200` can still be a failure.** `config validate` is the case: the agent
+answers `200` because the request succeeded and the answer is what the document
+is, so the status says nothing about the document. A command in that position
+reports its own exit code via `Command::exit_code`; returning `Success` because
+the transport succeeded made `config validate && config activate` activate a
+rejected document. `render` returning `Err` means something different — that the
+body was not the shape the command expects — so the two must not be conflated.
+
 ---
 
 ## Web API Rules
@@ -790,13 +859,130 @@ DELETE /api/v1/subscriptions/:id
 POST   /api/v1/subscriptions/:id/update
 ```
 
-WebSocket:
+The event stream:
 
 ```text
 /ws/v1/events
 ```
 
+**The path says `ws`; the transport is not WebSocket.** It is newline-delimited
+JSON over a chunked HTTP response. The path keeps its name from the design
+document, and there is no handshake and no framing.
+
+Three reasons, verified during implementation:
+
+* the server is HTTP/1.1 without upgrade support on this route, and implementing
+  a handshake, framing, masking, and ping/pong is a protocol implementation
+  rather than glue;
+* the stream is **one-directional** — the agent pushes, and everything a client
+  *does* goes through the REST endpoints — so WebSocket's distinguishing
+  capability is unused;
+* `fetch()` with a `ReadableStream` reads a chunked body incrementally on every
+  current engine, which was the historic reason to reach for WebSocket.
+
+A heartbeat is sent periodically, because a stream that is quiet for minutes
+looks like an idle connection to a proxy and gets cut. The Clash API relay *does*
+need real upgrade support, for the kernel's own WebSocket endpoints; that is a
+separate path under `/clash-api` and is described below.
+
 Keep API transport concerns out of Application.
+
+---
+
+## Web Interfaces
+
+The agent serves **two** browser interfaces, and they are not merged on purpose.
+
+```text
+/            this repository's operator interface (embedded; history routing)
+/ui/*        the upstream metacubexd dashboard (embedded; hash routing)
+/clash-api/* the dashboard's data feed, relayed to the kernel
+/api/control → 404
+```
+
+The operator interface owns this repository's vocabulary: lifecycle,
+configuration versions, subscriptions, capabilities, doctor, connections. The
+dashboard is a view over the kernel's own Clash API — proxy-group switching, node
+latency, the traffic graph, rule inspection. Reimplementing it was declined in
+ADR-001, so it is reused as a built artifact.
+
+### The dashboard is fetched, not built
+
+`scripts/fetch-metacubexd.sh` pulls upstream's published `gh-pages` artifact into
+`frontend/metacubexd/dist/`, which is **not committed**. Reasons:
+
+* building it here would make the Rust build depend on a Node toolchain and on
+  Google Fonts, so an offline or sandboxed `cargo build` would fail for a reason
+  unrelated to the agent;
+* upstream already publishes exactly this directory as its static release, so
+  consuming that avoids forking someone else's Nuxt app.
+
+A `cargo build` without the artifact succeeds and serves a placeholder page naming
+the script. `frontend/metacubexd/UPSTREAM_VERSION` records the tag in use and *is*
+committed, so a checkout states which version it expects.
+
+### `/api/control` must stay a 404
+
+Upstream probes `GET /api/control/info` to decide whether it is running beside a
+*control agent* — upstream's own supervisor, profile store, and kernel installer.
+Any error puts it in plain-panel mode and hides its Profile and kernel-control
+pages, which is what we want: running both would mean two processes that each
+believe they own the kernel (ADR-006 C4).
+
+The path is registered as a handler that returns `404` rather than left
+unmatched, because an unmatched path reaches the single-page fallback and would
+answer `200` with HTML — which the probe would read as an agent that exists with
+no features.
+
+### `/clash-api` is the only browser path to the kernel
+
+The relay exists because three things would otherwise be required, and each is
+worse than the relay:
+
+* **the kernel secret would reach the browser.** A page holding it can call
+  `PUT /configs`, which replaces the running configuration — a larger grant than
+  any endpoint this agent exposes, and one that cannot be revoked without
+  restarting the kernel;
+* **the controller would have to be reachable.** The default transport is a unix
+  socket precisely so it is not, and a browser cannot open one anyway;
+* **the dashboard would be cross-origin**, requiring the kernel's own
+  `external-controller-cors` to be loosened.
+
+So: the browser talks to the agent's origin, the real secret is injected by the
+relay, and the controller stays on its socket.
+
+Two rules that must not be relaxed:
+
+1. **Authorization is per method.** `GET`, `HEAD`, and `OPTIONS` serve a
+   read-only session; every other method requires an administrator. Verified
+   against upstream's API usage: every write it makes is a `PUT` or `POST`, and
+   no `GET` changes kernel state. An unrecognised method is treated as a write.
+2. **The real secret must never be disclosed to a page.** The generated
+   `config.js` sets `defaultBackendURL` and nothing else — in particular no
+   `controlToken`, which is how upstream's own server leaks its agent token into
+   the browser. Do not follow that pattern.
+
+### WebSocket upgrades are relayed, not implemented
+
+The dashboard's traffic, connections, memory, and logs pages are WebSockets. The
+relay forwards the upgrade and then moves bytes with `copy_bidirectional`; frames
+are never parsed. Implementing WebSocket to forward it would be a protocol to get
+wrong at every detail while adding nothing.
+
+Three things this cost to learn, each of which made *every* stream fail:
+
+* `serve_connection` must call `.with_upgrades()`, or hyper answers `101` and then
+  drops the socket;
+* the browser's `sec-websocket-key` must be forwarded. The kernel derives
+  `sec-websocket-accept` from it and the browser verifies that value against the
+  key it sent, so a relay that mints its own key produces a handshake every
+  browser rejects;
+* `Connection` is **not** stripped from the `101` response, though it *is* stripped
+  from the request. A `101` is only valid when it says `Connection: Upgrade`.
+
+Because a relay's failures live between two sockets, its tests must assert what
+the far end **received** — not that the relay returned without error. A test that
+only checks for `101` passes with all three bugs above present.
 
 ---
 
@@ -834,7 +1020,7 @@ SQLite stores metadata.
 
 Filesystem stores large/versioned config files.
 
-Recommended:
+The documented layout for a packaged install:
 
 ```text
 /etc/proxy-agent/
@@ -851,6 +1037,17 @@ Recommended:
     agent.sock
     mihomo.sock
 ```
+
+Every one of those paths is **configurable**, and nothing should hard-code them.
+`[paths]` in the configuration file sets the three directories; the agent socket
+comes from `[agent] socket`. This matters for more than taste: the agent runs in
+tests and in development checkouts rooted somewhere else entirely, and a compiled-in
+`/var/lib/proxy-agent` would make that impossible. `proxyctl agent run
+--print-config` reports the effective values and which source supplied each.
+
+`config.toml` must be mode `0600`. The loader refuses to start otherwise, because
+the file may hold the kernel secret — a group- or world-readable secret file is a
+worse failure than a refusal to start.
 
 Do not put full generated YAML into SQLite unless there is a concrete requirement.
 
@@ -938,6 +1135,18 @@ dashboard
 rollback
 ```
 
+The `dashboard` case means more than "the page loads". Verified by hand against a
+real kernel, and worth repeating before a release:
+
+```text
+/ui          serves the dashboard, not the placeholder page
+/ui/         the same (the trailing-slash route is registered separately)
+/clash-api/version      relays to the kernel
+/clash-api/{traffic,connections,memory,logs}   all four upgrade to 101
+/api/control/info       404, so upstream hides its control pages
+read-only session       GET and WebSocket allowed, PUT and POST refused with 403
+```
+
 ---
 
 ## Quality Gates
@@ -951,6 +1160,22 @@ cargo test --workspace
 cargo build --workspace
 ```
 
+Before merging changes to `frontend/admin`:
+
+```bash
+pnpm --dir frontend/admin check    # typecheck, lint, test, build
+```
+
+That gate is a separate toolchain, and it is **not** part of `cargo test`. A
+front-end change with a broken type or a missing translation therefore passes the
+Rust gates; run it when the diff touches `frontend/admin/`.
+
+The dashboard is a fetched artifact with no sources in this tree, so it has no
+gate of its own. What must be checked when the artifact is involved is the Rust
+side: `crates/interfaces/src/http/upgrade.rs` and
+`crates/infrastructure/src/mihomo/clash_relay.rs` carry the regression tests for
+the relay.
+
 When appropriate:
 
 ```bash
@@ -959,7 +1184,21 @@ cargo audit
 cargo deny check
 ```
 
-Do not suppress Clippy warnings without a concrete justification.
+Do not suppress Clippy warnings without a concrete justification. When a lint is
+disabled, the configuration states why — see `frontend/admin/.oxlintrc.json` for
+the pattern.
+
+### Verifying the whole thing
+
+`cargo test` covers the Rust layers. Two things it cannot:
+
+* **the interfaces in a browser.** The relay, the session cookie, and the CSP are
+  exercised by opening the agent's own pages against a real kernel. The symptoms
+  of getting these wrong are silent — a dashboard that renders and reports the
+  backend as unreachable, a stream that opens and never speaks.
+* **the field whitelist against a new kernel.** `mihomo -t` accepts unknown keys,
+  so a new upstream release can add a field that L2 then reports as a typo.
+  Regenerate with `scripts/gen-config-whitelist.py` when bumping the kernel.
 
 ---
 
@@ -988,7 +1227,7 @@ reqwest
 serde
 serde_json
 toml
-serde_yaml / serde_yml
+serde_yaml
 clap
 ratatui
 crossterm
@@ -996,10 +1235,26 @@ tracing
 tracing-subscriber
 async-trait
 thiserror
-sqlx
+rusqlite          # bundled; see "Why rusqlite" below
 ```
 
-The exact crate versions must be chosen from current stable releases during implementation; do not copy stale versions from this document.
+**`rusqlite`, not `sqlx`.** Both were candidates; `rusqlite` was chosen with the
+`bundled` feature, which compiles SQLite into the binary instead of linking the
+distribution's library. Two reasons, and the second is the one that decided it:
+
+* the agent targets Debian/Ubuntu *and* PVE LXC, where the system SQLite may be
+  older than the schema features used, and a version mismatch is a startup
+  failure rather than a degraded feature;
+* `sqlx` is async-first, which for a local file with no network round trip buys
+  nothing and costs a compile-time query verifier that needs a live database.
+
+Consequences that follow from the choice: repository methods use a bounded
+`SqlitePool` and run their statements through `spawn_blocking` where a call could
+block, because `rusqlite` is synchronous. Schema changes are versioned by
+`PRAGMA user_version`, not by migration files.
+
+The exact crate versions must be chosen from current stable releases during
+implementation; do not copy stale versions from this document.
 
 ---
 
