@@ -1,0 +1,319 @@
+/**
+ * The Chinese strings.
+ *
+ * Typed as `Translation`, which is `typeof en`. That is the enforcement mechanism:
+ * adding a key to `en.ts` makes this file fail to compile until it is translated,
+ * so a missing string cannot reach a build. The runtime parity test in
+ * `lib/i18n.test.ts` covers the other direction and the nested cases TypeScript's
+ * structural check is happy to leave.
+ *
+ * # What is *not* translated
+ *
+ * Agent messages. A failure reason, a log line, a doctor finding's text, a
+ * subscription's name — all of those arrive from the agent in whatever language it
+ * produced them, and the interface renders them verbatim. Translating a protocol
+ * message would mean a Chinese-language operator and an English-language one saw
+ * different text for the same failure, which is the opposite of what a diagnostic
+ * is for. Only this bundle's own vocabulary, and the labels for the agent's stable
+ * identifiers, are here.
+ */
+
+import type { Translation } from './en'
+
+export const zh: Translation = {
+  app: {
+    name: 'Proxy Control',
+    tagline: 'Mihomo 管理代理',
+  },
+
+  nav: {
+    overview: '概览',
+    mihomo: '内核',
+    configs: '配置',
+    subscriptions: '订阅',
+    connections: '连接',
+    logs: '日志',
+    system: '系统',
+    doctor: '体检',
+    signOut: '退出登录',
+  },
+
+  language: {
+    label: '语言',
+    en: 'English',
+    zh: '中文',
+  },
+
+  roles: {
+    admin: '管理员',
+    'read-only': '只读',
+  },
+
+  signIn: {
+    title: '登录',
+    subtitle: '请输入代理签发的 API 令牌。',
+    tokenLabel: 'API 令牌',
+    tokenPlaceholder: '粘贴令牌',
+    submit: '登录',
+    submitting: '正在登录…',
+    failed: '登录失败',
+    hint: '可在代理主机上执行 `proxyctl token issue` 签发。',
+    privacy: '令牌仅用于换取会话 Cookie，本页面不会保存它。',
+  },
+
+  common: {
+    retry: '重试',
+    refresh: '刷新',
+    cancel: '取消',
+    close: '关闭',
+    confirm: '确认',
+    copy: '复制',
+    copied: '已复制',
+    loading: '加载中…',
+    empty: '暂无数据',
+    unknown: '未知',
+    none: '无',
+    never: '从未',
+    yes: '是',
+    no: '否',
+    error: '出错了',
+    unreachable: '无法连接到代理',
+    unreachableHint: '请确认代理正在运行，且本页面连接的是正确地址。',
+    forbidden: '当前会话无权执行该操作',
+    notFound: '未找到',
+    confirmTitle: '确认操作？',
+    irreversible: '此操作无法撤销。',
+    language: '语言',
+  },
+
+  status: {
+    Running: '运行中',
+    Stopped: '已停止',
+    Starting: '启动中',
+    Stopping: '停止中',
+    Failed: '失败',
+    Degraded: '降级',
+    Unknown: '未知',
+    healthy: '健康',
+    unhealthy: '不健康',
+    live: '存活',
+    serving: '提供服务',
+    notServing: '未提供服务',
+  },
+
+  capability: {
+    supported: '支持',
+    unsupported: '不支持',
+    unavailable: '不可用',
+    misconfigured: '配置有误',
+    unknown: '未知',
+    probe: '探测',
+  },
+
+  severity: {
+    pass: '通过',
+    info: '提示',
+    warning: '警告',
+    error: '错误',
+  },
+
+  overview: {
+    title: '概览',
+    kernel: '内核',
+    activeConfig: '生效配置',
+    version: '版本',
+    health: '健康状态',
+    noHealth: '尚未进行健康检查',
+    runDoctor: '在「体检」页面运行一次检查，即可查看运行环境。',
+    capabilities: '能力',
+    recentJobs: '近期任务',
+    lastFailure: '最近一次失败',
+  },
+
+  mihomo: {
+    title: '内核',
+    lifecycle: '生命周期',
+    start: '启动',
+    stop: '停止',
+    restart: '重启',
+    reload: '重载',
+    proxyGroups: '代理组',
+    nodes: '节点',
+    groupNow: '当前选中',
+    groupKind: '类型',
+    nodeKind: '协议',
+    nodeDelay: '延迟',
+    noDelay: '未测速',
+    memberCount: '{{count}} 个成员',
+    delayValue: '{{ms}} 毫秒',
+    kernelVersion: '内核',
+    install: '安装内核',
+    updating: '正在更新…',
+    confirmRestart: '重启会短暂中断所有连接，是否继续？',
+    confirmStop: '停止会让所有客户端失去代理，是否继续？',
+  },
+
+  configs: {
+    title: '配置',
+    label: '版本',
+    source: '来源',
+    checksum: '校验和',
+    createdAt: '创建时间',
+    activatedAt: '生效时间',
+    active: '生效中',
+    activate: '启用',
+    rollback: '回滚',
+    validate: '校验',
+    validateTitle: '校验配置文档',
+    validateBody: '配置内容',
+    validatePlaceholder: '粘贴 YAML 配置…',
+    preflight: '预检',
+    syntax: '语法',
+    semantic: '语义',
+    acceptable: '是否可用',
+    confirmActivate: '启用会以该版本重载内核，是否继续？',
+    confirmRollback: '回滚会重新启用 {{label}}，是否继续？',
+    activated: '已启用 {{label}}',
+    rolledBack: '已回滚到 {{label}}',
+  },
+
+  subscriptions: {
+    title: '订阅',
+    name: '名称',
+    enabled: '已启用',
+    interval: '更新间隔',
+    intervalNone: '未设置定时',
+    intervalValue: '{{seconds}} 秒',
+    due: '待更新',
+    lastUpdate: '上次更新',
+    add: '添加订阅',
+    addTitle: '新建订阅',
+    edit: '编辑',
+    url: '订阅地址',
+    urlPlaceholder: 'https://example.com/sub?token=…',
+    urlHint: '地址中的凭据会保存在代理上，之后不会再显示。',
+    userAgent: 'User-Agent',
+    schedule: '定时更新',
+    scheduleNone: '不定时更新',
+    updateNow: '立即更新',
+    remove: '删除',
+    confirmRemove: '删除订阅后无法恢复，是否继续？',
+    created: '订阅已创建',
+    updated: '订阅已更新',
+    removed: '订阅已删除',
+  },
+
+  connections: {
+    title: '连接',
+    source: '来源',
+    destination: '目标',
+    rule: '规则',
+    rulePayload: '规则内容',
+    chains: '链路',
+    process: '进程',
+    uid: 'UID',
+    processPath: '可执行文件',
+    startedAt: '建立时间',
+    upload: '上传',
+    download: '下载',
+    inbound: '入站',
+    close: '关闭',
+    closeAll: '全部关闭',
+    confirmClose: '关闭该连接会中断其传输，是否继续？',
+    confirmCloseAll: '此操作会同时中断所有活动连接，等同于全局切断开关。',
+    totalUpload: '总上传',
+    totalDownload: '总下载',
+    activeCount: '{{count}} 条活动连接',
+    processHidden: '进程信息仅对管理员显示。',
+    closed: '已关闭 {{count}} 条连接',
+    searchPlaceholder: '按主机、进程或规则筛选…',
+  },
+
+  logs: {
+    title: '日志',
+    level: '级别',
+    follow: '跟随中',
+    paused: '已暂停',
+    pause: '暂停',
+    resume: '继续',
+    clear: '清空',
+    filterPlaceholder: '筛选日志行…',
+    waiting: '等待内核输出…',
+    hiddenFromReadOnly: '内核日志不会发送给只读会话。',
+    lines: '{{count}} 行',
+    disconnected: '日志流已断开，正在重连…',
+  },
+
+  system: {
+    title: '系统',
+    environment: '运行环境',
+    os: '操作系统',
+    osVersion: '版本',
+    arch: '架构',
+    kernel: '内核版本',
+    init: 'init 系统',
+    container: '容器环境',
+    capabilities: '能力',
+    audit: '审计记录',
+    auditAction: '操作',
+    auditActor: '操作者',
+    auditTarget: '对象',
+    auditResult: '结果',
+    auditAt: '时间',
+    auditOk: '成功',
+    auditFailed: '失败',
+    jobs: '任务',
+    jobKind: '类型',
+    jobState: '状态',
+    jobStep: '步骤',
+    jobDetail: '详情',
+    jobDegradation: '降级说明',
+  },
+
+  doctor: {
+    title: '体检',
+    verdict: '结论',
+    findings: '检查项',
+    code: '代码',
+    message: '说明',
+    severity: '级别',
+    run: '开始检查',
+    running: '检查中…',
+    clean: '未发现问题，运行环境正常。',
+  },
+
+  events: {
+    connected: '实时',
+    reconnecting: '重连中',
+    disconnected: '已断开',
+    lagged: '事件有丢失，正在重新读取状态',
+    heartbeat: '心跳',
+    kind: {
+      'mihomo.log': '内核日志',
+      'config.activated': '配置已启用',
+      'config.rolled_back': '配置已回滚',
+      'subscription.updated': '订阅已更新',
+      'job.progress': '任务进度',
+      'job.finished': '任务完成',
+      heartbeat: '心跳',
+      lagged: '事件丢失',
+    },
+  },
+
+  time: {
+    justNow: '刚刚',
+    secondsAgo: '{{count}} 秒前',
+    minutesAgo: '{{count}} 分钟前',
+    hoursAgo: '{{count}} 小时前',
+    daysAgo: '{{count}} 天前',
+    inSeconds: '{{count}} 秒后',
+    inMinutes: '{{count}} 分钟后',
+  },
+
+  units: {
+    bytes: '{{value}} B',
+    kilobytes: '{{value}} KB',
+    megabytes: '{{value}} MB',
+    gigabytes: '{{value}} GB',
+  },
+}

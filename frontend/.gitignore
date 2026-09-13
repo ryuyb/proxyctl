@@ -1,0 +1,7 @@
+# Dependencies and build outputs are per package; see frontend/admin/.gitignore.
+# This file covers the workspace root, where pnpm puts its own store and lockfile
+# bookkeeping.
+node_modules
+
+# pnpm's virtual store lives here in a workspace layout.
+.pnpm-store

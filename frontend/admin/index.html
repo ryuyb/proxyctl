@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- The interface renders kernel hostnames, subscription names, and log lines,
+         all of which are attacker-influenced in the general case. The agent sends
+         no `Content-Security-Policy` of its own, so this is where the page states
+         what it needs: its own bundle, its own styles, and no inline script.
+         `connect-src 'self'` is what keeps an injected script from exfiltrating a
+         rendered connection list to another origin. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <meta name="referrer" content="same-origin" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Proxy Control</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

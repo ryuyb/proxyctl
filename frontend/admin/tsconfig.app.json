@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+
+    /* Must match the alias in `vite.config.ts`. The two are separate declarations
+     * of the same fact — TypeScript resolves types, Vite resolves the bundle —
+     * so changing one without the other fails at build time, not before.
+     *
+     * No `baseUrl`: TypeScript 6 deprecates it, and these paths are already
+     * relative to this file, which is what `baseUrl: "."` would have said. */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+    /* `verbatimModuleSyntax` below requires type-only imports to be written as
+     * such. `strict` is on for the same reason it is on in the Rust workspace:
+     * a null the compiler can see is cheaper than one it cannot. */
+    "strict": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"],
+  /* Tests are excluded because they run under Node and need `node` types, which
+   * this config deliberately withholds — see `tsconfig.test.json`. Without this,
+   * every test file is checked twice, once with the wrong ambient types. */
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}

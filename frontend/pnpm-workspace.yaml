@@ -1,0 +1,22 @@
+# The workspace root for the browser interfaces.
+#
+# Paths are relative to *this* file's directory, which is `frontend/` — so the
+# glob is `admin`, not `frontend/admin`. Writing the latter would resolve to
+# `frontend/frontend/admin` and silently match nothing, which pnpm reports only
+# as "all 0 workspace projects" while exiting successfully.
+#
+# `admin` is the operator interface this repository builds and embeds.
+# `metacubexd` will hold the vendored upstream dashboard once its licence is
+# confirmed; it is a separate package because it is built and versioned
+# independently.
+packages:
+  - "admin"
+
+# pnpm 12 reads settings from this file rather than from `.npmrc`, so a
+# `store-dir` in either package's `.npmrc` is silently ignored.
+#
+# It is set at all because the default lives under `~/Library/Caches`, which is
+# not reliably writable on a sandboxed or shared machine, and a failed store
+# write aborts the install. The store is content-addressed, so putting it in a
+# directory that a reboot clears costs a re-download, never a corrupt install.
+storeDir: /tmp/proxyctl-pnpm-store

@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "es2023",
+    /* Node for the runner, DOM for the callbacks handed to `page.evaluate`. The
+     * browser suite needs both: the test body runs in Node, and the function it
+     * passes to `evaluate` is serialised and run in the page. */
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "module": "nodenext",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  /* Everything that runs in Node before or outside the bundle: the bundler's own
+   * config, the test runner's, and the browser suite. None of it is part of the
+   * application, so none of it should be checked with `vite/client` in scope. */
+  "include": ["vite.config.ts", "vitest.config.ts", "playwright.config.ts", "e2e/**/*.ts"]
+}

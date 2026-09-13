@@ -1,0 +1,19 @@
+{
+  // A solution file: it holds no sources of its own, only references to the
+  // projects that do, so `tsc -b` checks each with the right ambient types.
+  //
+  // Three configurations rather than one because they disagree about what
+  // `globalThis` contains, and merging them would mean giving the application
+  // `node` types it must not have:
+  //
+  //   app   the browser. `vite/client` only, so a `node:fs` import in a
+  //         component is a compile error rather than a bundling failure.
+  //   test  Node plus the browser. Tests read the filesystem and run assertions.
+  //   node  `vite.config.ts`, which runs in Node before anything is bundled.
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" },
+    { "path": "./tsconfig.test.json" }
+  ]
+}

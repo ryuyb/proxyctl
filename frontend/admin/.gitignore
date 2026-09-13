@@ -1,0 +1,27 @@
+# Build outputs and dependencies
+node_modules
+dist
+dist-ssr
+
+# Editor and OS
+.DS_Store
+*.local
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs
+logs
+*.log
+
+# TypeScript's incremental build state
+*.tsbuildinfo
+
+# Playwright's failure artifacts
+test-results
+playwright-report

@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    // Tests run under Node, not in a browser, so they need `node` types on top of
+    // the application's `vite/client`. The application's own config keeps
+    // `vite/client` alone deliberately: letting `Buffer`, `process`, and
+    // `node:fs` type-check inside a component would hide a bundling failure until
+    // runtime, when the browser is the one that has to fail.
+    "types": ["vite/client", "node", "vitest/globals"],
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "noEmit": true
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx"],
+  // Cleared deliberately. `extends` inherits `exclude`, and `tsconfig.app.json`
+  // excludes exactly the files this project exists to check — so without this the
+  // test project matches nothing and `tsc -b` fails with "no inputs were found".
+  "exclude": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "rules": {
+    "react/rules-of-hooks": "error",
+
+    // Off, with a reason rather than for convenience.
+    //
+    // `only-export-components` warns that a module exporting both a component and
+    // a plain function will not hot-reload cleanly. Every hit here is one of two
+    // legitimate shapes:
+    //
+    //   * `components/ui/*` — shadcn's generated files export a component and its
+    //     `cva` variant table side by side. Splitting them would mean editing
+    //     generated code on every regeneration.
+    //   * `session-provider.tsx` — a provider and the context accessor that reads
+    //     it, which belong together because the context object is an implementation
+    //     detail of the provider.
+    //
+    // The cost is a full reload instead of a hot swap when one of these files is
+    // edited. That is a development-time inconvenience, not a defect in the
+    // shipped bundle, so it is not worth contorting the source to silence.
+    "react/only-export-components": "off"
+  }
+}
