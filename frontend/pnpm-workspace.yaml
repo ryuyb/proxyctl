@@ -5,18 +5,20 @@
 # `frontend/frontend/admin` and silently match nothing, which pnpm reports only
 # as "all 0 workspace projects" while exiting successfully.
 #
-# `admin` is the operator interface this repository builds and embeds.
-# `metacubexd` will hold the vendored upstream dashboard once its licence is
-# confirmed; it is a separate package because it is built and versioned
-# independently.
+# `admin` is the operator interface this repository builds and embeds. The
+# dashboard is not a package here: it is fetched as a built artifact by
+# `scripts/fetch-metacubexd.sh`, because building it would add a second Node
+# toolchain and a Google Fonts dependency to the Rust build.
 packages:
   - "admin"
 
-# pnpm 12 reads settings from this file rather than from `.npmrc`, so a
-# `store-dir` in either package's `.npmrc` is silently ignored.
+# No `storeDir` here, deliberately.
 #
-# It is set at all because the default lives under `~/Library/Caches`, which is
-# not reliably writable on a sandboxed or shared machine, and a failed store
-# write aborts the install. The store is content-addressed, so putting it in a
-# directory that a reboot clears costs a re-download, never a corrupt install.
-storeDir: /tmp/proxyctl-pnpm-store
+# One was set while working on a machine where the default store location was not
+# writable, which is a local environment fact rather than a property of this
+# project. Committing it put the store in `/tmp` on CI, where the path does not
+# exist for the caching step and every run failed in a post-action.
+#
+# A machine that needs it should set it in a *user-level* config
+# (`~/.npmrc`, or `pnpm config set store-dir`), or export
+# `PROXYCTL_PNPM_STORE`, rather than change this file for everyone.
