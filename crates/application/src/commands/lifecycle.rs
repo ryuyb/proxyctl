@@ -121,10 +121,16 @@ async fn options_from_active(
         return Ok(None);
     };
 
-    // The template supplies the host-level fields. Without one there is no binary to
-    // launch, and the caller's own diagnostics are clearer than a guess here.
+    // The host-level fields come from the options recorded at composition. They are
+    // always present now — a deployment with no active configuration still knows
+    // where its kernel binary is — so a missing set is a genuine fault rather than
+    // the ordinary case it used to be when this returned `None` outright.
     let Some(mut options) = ctx.start_options() else {
-        return Ok(None);
+        return Err(ApplicationError::InvalidState(
+            "the agent has no kernel launch options, which means it was composed \
+             without them. This is a deployment fault, not a missing configuration"
+                .to_owned(),
+        ));
     };
 
     options.config_path = ctx.configs.body_path(&active).await?.display().to_string();

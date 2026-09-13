@@ -673,6 +673,23 @@ pub struct FakeProcessManager {
     pub fail_start: bool,
     /// A process that `discover` should report, simulating an adopted kernel.
     pub adoptable: Mutex<Option<ProcessHandle>>,
+    /// The options the last `start` was called with.
+    ///
+    /// Public like the other fields, because a test that builds this struct
+    /// literally has to name every one of them.
+    pub started_options: Mutex<Option<StartOptions>>,
+}
+
+impl FakeProcessManager {
+    /// The options the most recent `start` received, if any.
+    ///
+    /// Lets a test assert what a start was actually asked to launch, which is the
+    /// only way to distinguish re-reading the active version from reusing a stale
+    /// snapshot.
+    #[must_use]
+    pub fn started_with(&self) -> Option<StartOptions> {
+        self.started_options.lock().ok().and_then(|o| o.clone())
+    }
 }
 
 impl Default for FakeProcessManager {
@@ -682,6 +699,7 @@ impl Default for FakeProcessManager {
             calls: CallLog::new(),
             fail_start: false,
             adoptable: Mutex::new(None),
+            started_options: Mutex::new(None),
         }
     }
 }
@@ -690,6 +708,13 @@ impl Default for FakeProcessManager {
 impl ProcessManager for FakeProcessManager {
     async fn start(&self, options: &StartOptions) -> Result<ProcessHandle, PortError> {
         self.calls.push("start");
+        // Recorded, not ignored. Which configuration a start launches is the whole
+        // observable content of `start`, and a double that discarded the options
+        // could not tell a correct implementation from one that reused a stale
+        // snapshot — the defect this exists to catch.
+        if let Ok(mut recorded) = self.started_options.lock() {
+            *recorded = Some(options.clone());
+        }
         if self.fail_start {
             return Err(PortError::PermissionDenied("cannot execute binary".into()));
         }

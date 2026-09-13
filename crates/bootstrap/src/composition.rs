@@ -127,13 +127,7 @@ impl Bootstrap {
         // because the path depends on which configuration version is active and
         // that is a repository read.
         let configs = factory.configs(&config.paths);
-        let builder = match Self::start_options(config, configs.as_ref()).await? {
-            Some(options) => builder.start_options(options),
-            // Nothing is active yet, so there is nothing to spawn. The agent
-            // still starts: it can activate a version, and an agent that cannot
-            // boot cannot report why it cannot start the kernel.
-            None => builder,
-        };
+        let builder = builder.start_options(Self::start_options(config, configs.as_ref()).await?);
 
         // The fetch policy is parsed from configuration and fails fast: a
         // malformed allow-list entry must be reported at startup, not silently
@@ -380,25 +374,36 @@ impl Bootstrap {
     pub async fn start_options(
         config: &RuntimeConfig,
         configs: &dyn proxy_application::ports::ConfigRepository,
-    ) -> Result<Option<StartOptions>, BootstrapError> {
+    ) -> Result<StartOptions, BootstrapError> {
         let active = configs.active(&config.instance).await.map_err(|e| {
             BootstrapError::InvalidConfig(format!(
                 "cannot read the active configuration version: {e}"
             ))
         })?;
 
-        // No active version is a supported state, not a failure: the agent starts
-        // and reports that a start would have nothing to load.
-        let Some(active) = active else {
-            return Ok(None);
-        };
-
-        Ok(Some(StartOptions {
+        // The host-level fields are always available: they describe where the
+        // kernel is installed and which directory it treats as its own, neither of
+        // which depends on a configuration existing.
+        //
+        // This used to return `None` when nothing was active, which meant the agent
+        // held nothing at all — so storing a first configuration could not make a
+        // start possible, because there was no binary path to launch it with. The
+        // symptom was `config add` succeeding and the very next `start` still
+        // reporting "no configuration is active".
+        //
+        // The config path is left empty when nothing is active, and
+        // `StartMihomo` fills it from the active pointer on every start. It has to
+        // be filled there rather than here because this runs once, at composition,
+        // while the active version can change at any time.
+        Ok(StartOptions {
             binary_path: config.kernel_binary.clone(),
             working_dir: config.kernel_data_dir(),
-            config_path: config_body_path(config, &active.label()),
+            config_path: match active {
+                Some(active) => config_body_path(config, &active.label()),
+                None => String::new(),
+            },
             required_capabilities: Vec::new(),
-        }))
+        })
     }
 
     /// Validates and returns the controller endpoint to use.

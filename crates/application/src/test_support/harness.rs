@@ -122,12 +122,23 @@ impl Harness {
     }
 
     /// Seeds a stored version and marks it active, simulating prior state.
+    ///
+    /// The version's *label* comes from its sequence, not from its identifier, so
+    /// this is the number that decides which body path a start will be given. A
+    /// fixed sequence made two seeded versions indistinguishable, which quietly
+    /// defeated a test asserting that a start follows the active pointer: both
+    /// candidates produced `v001`, so reused-snapshot and re-derived looked alike.
     pub fn set_active(&self, id: &str) {
+        self.set_active_at(id, 1);
+    }
+
+    /// Seeds a version with an explicit sequence, so its label is predictable.
+    pub fn set_active_at(&self, id: &str, sequence: u64) {
         let version_id = ConfigVersionId::parse(id).expect("valid version id");
         let version = ConfigVersion::record(
             version_id.clone(),
             self.ctx.instance.clone(),
-            1,
+            sequence,
             ConfigSource::Manual,
             ConfigChecksum::from_digest(1),
             Timestamp::from_unix_seconds(1),

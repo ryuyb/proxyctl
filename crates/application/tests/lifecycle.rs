@@ -47,6 +47,78 @@ fn ready_harness() -> Harness {
     harness
 }
 
+// ------------------------------------------------- active-version coupling
+
+/// A start must use the configuration that is active *now*, not a path baked in
+/// beforehand.
+///
+/// This is the regression test for a defect that took three attempts to corner: the
+/// launch options were resolved once and stored, so an agent that began with no
+/// configuration held nothing and storing one did not make a start possible. The
+/// very next `start` still reported "no configuration is active" while `config
+/// list` showed a version that was.
+///
+/// # Why the fixture seeds a *deliberately wrong* path
+///
+/// Asserting that the path contains `v001` proves nothing, because the seeded
+/// options already say `v001`. That version of this test passed against code that
+/// ignored the active pointer entirely — a test that cannot fail is worse than none.
+///
+/// So the seeded path is a decoy the active version does not use. Only re-deriving
+/// from the active pointer produces the expected path; reusing the snapshot
+/// produces the decoy.
+#[tokio::test]
+async fn a_start_uses_the_currently_active_configuration() {
+    let harness = ready_harness();
+
+    // The options say `v001`, but the version activated below is `default-002`,
+    // whose body path is `v002`.
+    harness.set_active_at("default-002", 2);
+
+    StartMihomo::execute(&harness.ctx, NOW)
+        .await
+        .expect("a start with an active configuration must succeed");
+
+    let started = harness
+        .process
+        .started_with()
+        .expect("the process was started");
+
+    assert!(
+        started.config_path.contains("v002"),
+        "the launch must point at the active version (v002), got {}",
+        started.config_path
+    );
+    assert!(
+        !started.config_path.contains("v001"),
+        "the launch reused the snapshot path instead of re-deriving it: {}",
+        started.config_path
+    );
+}
+
+/// Options recorded at composition are what a start needs even when nothing was
+/// active then: they carry where the kernel binary lives, which has nothing to do
+/// with which configuration is selected.
+#[tokio::test]
+async fn start_options_exist_before_any_configuration_does() {
+    let harness = ready_harness();
+
+    assert!(
+        harness.ctx.start_options().is_some(),
+        "the host-level launch options must be present regardless of the active version"
+    );
+    assert!(
+        harness
+            .ctx
+            .configs
+            .active(&harness.ctx.instance)
+            .await
+            .expect("active")
+            .is_none(),
+        "the fixture must have no active version, or it does not test the case"
+    );
+}
+
 // -------------------------------------------------------------- start
 
 #[tokio::test]
