@@ -102,7 +102,8 @@ PROXYCTL_BASE_URL=https://mirror.example/proxyctl ./scripts/install.sh
 * the agent works without one. `proxyctl doctor` and the web interface both come
   up, and "no kernel yet" is a valid state rather than a broken install.
 
-Install one with `proxyctl mihomo install`.
+Install one with `proxyctl mihomo update <version>`, for example
+`proxyctl mihomo update v1.19.30`.
 
 **On checksums.** The `.sha256` is fetched from the same place as the artifact, so
 it is not independent evidence — it catches a truncated or mismatched download,
@@ -138,8 +139,10 @@ The prebuilt binary has no runtime dependencies. Building from source needs Rust
 # 1. Start the agent
 sudo systemctl start proxy-agent
 
-# 2. Install a kernel
-sudo -u proxy-agent proxyctl mihomo install
+# 2. Install a kernel. The version is required — there is no "latest" shorthand,
+#    because the agent verifies the artifact against a checksum and picking a
+#    version is a decision rather than a default.
+sudo -u proxy-agent proxyctl mihomo update v1.19.30
 
 # 3. See what this environment can actually do
 sudo -u proxy-agent proxyctl doctor
@@ -180,8 +183,8 @@ proxyctl status                 # what the kernel is doing
 proxyctl doctor                 # environment and capabilities
 proxyctl start | stop | restart | reload
 
-proxyctl mihomo install         # fetch and verify a kernel release
-proxyctl mihomo version
+proxyctl mihomo update v1.19.30 # fetch, verify and install a kernel release
+proxyctl mihomo version         # what is installed now
 
 proxyctl config list            # every configuration version
 proxyctl config validate FILE   # preflight, syntax, semantic

@@ -87,7 +87,8 @@ PROXYCTL_BASE_URL=https://mirror.example/proxyctl ./scripts/install.sh
 * 内核由 agent 做校验和验证，选择哪个版本属于运维的判断；
 * **没有内核 agent 照样能用** —— `proxyctl doctor` 与 Web 界面都能起来，「还没装内核」是一个合法状态，而非装坏了。
 
-用 `proxyctl mihomo install` 安装内核。
+用 `proxyctl mihomo update <版本号>` 安装内核，例如
+`proxyctl mihomo update v1.19.30`。
 
 **关于校验和。** `.sha256` 与产物来自同一处，因此它**不是独立证据** —— 它能发现下载截断或产物名不匹配，但发现不了被替换。脚本在校验时会说明这一点。
 </details>
@@ -119,8 +120,9 @@ Linux + systemd，架构为 `x86_64` 或 `aarch64`。实测过的是 Debian/Ubun
 # 1. 启动 agent
 sudo systemctl start proxy-agent
 
-# 2. 安装内核
-sudo -u proxy-agent proxyctl mihomo install
+# 2. 安装内核。版本号是必填的 —— 没有 "latest" 简写，
+#    因为 agent 会校验产物的 checksum，且选择哪个版本是一个决定，而非默认值。
+sudo -u proxy-agent proxyctl mihomo update v1.19.30
 
 # 3. 看看这个环境实际能做什么
 sudo -u proxy-agent proxyctl doctor
@@ -156,8 +158,8 @@ proxyctl status                 # 内核当前状态
 proxyctl doctor                 # 运行环境与能力
 proxyctl start | stop | restart | reload
 
-proxyctl mihomo install         # 拉取并校验内核发行版
-proxyctl mihomo version
+proxyctl mihomo update v1.19.30 # 拉取、校验并安装内核发行版
+proxyctl mihomo version         # 当前已安装的版本
 
 proxyctl config list            # 全部配置版本
 proxyctl config validate FILE   # 预检、语法、语义

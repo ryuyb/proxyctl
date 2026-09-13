@@ -11,7 +11,7 @@
 #
 # * the kernel is a separate program with its own licence (GPL-3.0), and having
 #   an installer fetch it would put the corresponding-source obligation on this
-#   script rather than on the operator's own `proxyctl mihomo install`;
+#   script rather than on the operator's own `proxyctl mihomo update`;
 # * the agent verifies the kernel against a checksum, and a release is the wrong
 #   place for that decision — an operator may want a specific version, or none
 #   yet, while they set up the agent first;
@@ -460,8 +460,10 @@ info ""
 info "  1. Review ${CONFIG}, then start the agent:"
 info "       ${C_DIM}systemctl start proxy-agent${C_RESET}"
 info ""
-info "  2. Install a Mihomo kernel — this installer deliberately does not:"
-info "       ${C_DIM}proxyctl mihomo install${C_RESET}"
+info "  2. Install a Mihomo kernel — this installer deliberately does not."
+info "     The version is required: the agent verifies the checksum, and picking"
+info "     one is a decision rather than a default. Any release tag will do."
+info "       ${C_DIM}proxyctl mihomo update v1.19.30${C_RESET}"
 info ""
 info "  3. Check the environment before trusting it:"
 info "       ${C_DIM}proxyctl doctor${C_RESET}"
