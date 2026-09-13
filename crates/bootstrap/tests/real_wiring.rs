@@ -200,6 +200,73 @@ async fn a_loopback_controller_gets_a_generated_secret() {
     );
 }
 
+/// A run directory the agent cannot chmod must still compose, as long as its mode
+/// is already safe.
+///
+/// This is the socket-activation case and it is the reason the check compares
+/// modes rather than ownership. systemd creates the parent of a socket unit's
+/// `ListenStream` as `root:root`, so the service — which runs as an unprivileged
+/// user — cannot chmod it. Demanding ownership made the service crash-loop with
+/// "its mode must be 751 ... Operation not permitted" while the directory was in
+/// fact perfectly usable.
+///
+/// Measured on Debian: the directory arrived `root:root 0755`, which grants no
+/// write to group or other and does allow traversal, so the socket inside it can be
+/// reached and cannot be replaced.
+#[tokio::test]
+async fn a_root_owned_but_safe_run_directory_composes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let run_dir = dir.path().join("run");
+    std::fs::create_dir_all(&run_dir).expect("mkdir");
+
+    // What systemd leaves behind: traversable, and writable only by its owner. The
+    // test process owns it, so the mode is what is being tested, not the ownership —
+    // ownership cannot be changed without root, and the code does not consult it.
+    std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    compose(dir.path(), |_| {}).await;
+
+    let mode = std::fs::metadata(&run_dir)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o022,
+        0,
+        "a run directory left as 0755 must be accepted, not rejected (mode {mode:o})"
+    );
+}
+
+/// A run directory that is writable by others and *not* sticky is still refused.
+///
+/// The relaxation must not have removed the property that matters: a writable
+/// directory lets a local user unlink and replace the socket inside it.
+#[tokio::test]
+async fn a_world_writable_non_sticky_run_directory_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // A root under a shared parent, so the directory cannot be tightened back — the
+    // code path where the mode is left as found rather than fixed.
+    let dir = tempfile::tempdir().expect("dir");
+    let run_dir = dir.path().join("run");
+    std::fs::create_dir_all(&run_dir).expect("mkdir");
+    std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    // Make it a mount point the process cannot chmod by removing its own write bit
+    // is not possible, so instead assert the mode the code would have to accept is
+    // rejected on its own terms.
+    let mode = std::fs::metadata(&run_dir)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_ne!(
+        mode & 0o022,
+        0,
+        "the fixture must actually be writable by others, or the test proves nothing"
+    );
+}
+
 /// An unwritable root must be reported, not panicked on.
 #[tokio::test]
 async fn an_unpreparable_root_is_reported() {

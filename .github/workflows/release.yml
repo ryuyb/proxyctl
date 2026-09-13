@@ -129,6 +129,7 @@ jobs:
           cp target/${{ matrix.target }}/release/proxyctl "dist/$name/"
           cp packaging/config.toml.example "dist/$name/"
           cp packaging/systemd/proxy-agent.service "dist/$name/"
+          cp packaging/systemd/proxy-agent.socket "dist/$name/"
           cp frontend/metacubexd/UPSTREAM_VERSION "dist/$name/METACUBEXD_VERSION"
           ( cd dist && tar czf "$name.tar.gz" "$name" )
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )

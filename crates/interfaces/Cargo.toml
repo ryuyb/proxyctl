@@ -16,6 +16,9 @@ path = "src/lib.rs"
 # nothing more. It depends on the application and the domain's read-only types,
 # never on infrastructure — that direction is what keeps an adapter replaceable.
 [dependencies]
+# For adopting a listening socket from the service manager, which needs
+# `FromRawFd` — unsafe, and therefore confined to this crate.
+proxy-sys = { path = "../sys" }
 proxy-domain = { path = "../domain" }
 proxy-application = { path = "../application" }
 thiserror.workspace = true

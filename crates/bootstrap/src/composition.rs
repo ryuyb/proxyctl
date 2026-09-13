@@ -536,41 +536,72 @@ async fn create_directory(path: &str, mode: u32, seal: Seal) -> Result<(), Boots
     match tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            let world_accessible = current & 0o007 != 0;
+            // A directory we cannot rewrite is still usable if it already grants no
+            // more than the socket needs, and the check below is that comparison
+            // rather than an ownership test. Ownership is deliberately not
+            // considered: systemd creates a socket unit's parent directory as
+            // `root:root`, so requiring the service user to own it makes an
+            // otherwise correct deployment refuse to start.
+            //
+            // What the modes must guarantee, for a directory holding a socket:
+            //
+            // * no write for group or other — a writable directory lets a user
+            //   unlink and replace the socket inside it;
+            // * execute for whoever has to reach that socket, which is `other` for
+            //   the agent's own socket and `group` for a group-restricted one.
+            //
+            // Read is not required and is not checked: listing a directory reveals
+            // the socket's name, which is public in the configuration anyway.
+            let writable_by_others = current & 0o022 != 0;
             // A sticky directory (mode 1000) prevents one user from removing or
-            // replacing another user's entries, which is the protection the
-            // socket needs from its parent. `/tmp` is the canonical case: it is
-            // world-accessible by design and is not the agent's to change.
+            // replacing another's entries, which is the protection the socket needs
+            // from a parent that must stay writable. `/tmp` is the canonical case.
             let sticky = current & 0o1000 != 0;
 
-            match (seal, world_accessible, sticky) {
-                // Already private enough for a preferred seal.
-                (Seal::Preferred, false, _) => Ok(()),
-                // Acceptable for either seal: shared but not replaceable.
-                (_, true, true) => Ok(()),
-                // A required seal that we could not apply, on a directory that is
-                // genuinely exposed.
-                (Seal::Required, true, false) => Err(BootstrapError::Paths {
-                    path: path.to_owned(),
-                    reason: format!(
-                        "its mode must be {mode:o} because it holds the control socket, but it \
-                         could not be set ({e}); anything able to reach the socket can control \
-                         the kernel"
-                    ),
-                }),
-                // A required seal on a non-world-accessible directory we cannot
-                // rewrite: acceptable, since it is already narrower than needed.
-                (Seal::Required, false, _) => Ok(()),
-                // A preferred seal on a world-accessible, non-sticky directory
-                // that is not ours to change.
-                (Seal::Preferred, true, false) => Err(BootstrapError::Paths {
-                    path: path.to_owned(),
-                    reason: format!(
-                        "it is world-accessible (mode {current:o}) and not sticky, and cannot be \
-                         tightened ({e}); either fix its permissions or choose a different location"
-                    ),
-                }),
+            // The bits this directory needs to be reachable by the caller it was
+            // configured for. `mode` carries them, so the requirement is that the
+            // existing directory grants at least those.
+            let reachable = current & (mode & 0o011) == (mode & 0o011);
+
+            // Writable by others but sticky: one user cannot replace another's
+            // entry, which is the property the socket needs from its parent. This is
+            // the only case where stickiness is decisive — it is irrelevant to a
+            // directory others cannot write at all.
+            if writable_by_others && sticky {
+                return Ok(());
             }
+
+            // Not writable by others, and reachable by whoever must reach the
+            // socket. Ownership is not part of this test: systemd creates a socket
+            // unit's parent directory as `root:root`, and requiring the service user
+            // to own it is what made a correct deployment refuse to start.
+            if !writable_by_others && reachable {
+                return Ok(());
+            }
+
+            let reason = if writable_by_others {
+                format!(
+                    "it is writable by group or other (mode {current:o}), so a local user could \
+                     replace the socket inside it, and its mode could not be set to {mode:o} ({e})"
+                )
+            } else {
+                format!(
+                    "its mode is {current:o} and could not be set to {mode:o} ({e}); at least one \
+                     of group or other execute is needed for the socket to be reachable"
+                )
+            };
+
+            // A preferred seal accepts any directory that is not writable by others,
+            // even one that is not reachable — a deployment may legitimately point a
+            // data directory somewhere the agent only reads through.
+            if seal == Seal::Preferred && !writable_by_others {
+                return Ok(());
+            }
+
+            Err(BootstrapError::Paths {
+                path: path.to_owned(),
+                reason,
+            })
         }
     }
 }

@@ -91,6 +91,14 @@ pub struct SocketSpec {
     pub path: PathBuf,
     /// The mode to apply to the socket file.
     pub mode: u32,
+    /// Whether a listener inherited from the service manager may be adopted.
+    ///
+    /// True for the agent's own socket and false for any other, because the value
+    /// decides whether an existing file at `path` is *reused* or *replaced*. The
+    /// service manager owns the socket it passes, so replacing it would break the
+    /// activation contract; a socket the agent owns itself is stale by definition if
+    /// something is already there.
+    pub adoptable: bool,
 }
 
 impl SocketSpec {
@@ -109,6 +117,20 @@ impl SocketSpec {
             // the open agent socket leaves the unauthenticated kernel socket
             // reachable by any local user. See the module header.
             mode: 0o666,
+            adoptable: true,
+        }
+    }
+
+    /// A spec whose listener is never inherited.
+    ///
+    /// Used for listeners the agent owns outright, and in tests, so that binding
+    /// behaviour does not depend on whether the test runner happens to have
+    /// inherited descriptors.
+    #[must_use]
+    pub fn owning(path: impl Into<PathBuf>) -> Self {
+        Self {
+            adoptable: false,
+            ..Self::new(path)
         }
     }
 }
@@ -314,15 +336,34 @@ async fn spec_listen_socket(
     spec: &SocketSpec,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), std::io::Error> {
-    if spec.path.exists() {
-        std::fs::remove_file(&spec.path)?;
-    }
-    if let Some(parent) = spec.path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    // The service manager's listener is tried first, and *before* the stale-file
+    // cleanup below: that cleanup unlinks whatever is at `path`, which for an
+    // inherited socket is systemd's own file. Removing it does not fail — the
+    // descriptor stays valid and this process keeps serving — so the damage would
+    // not surface until a restart, when systemd tried to re-adopt a socket file
+    // that no longer existed. Bind-then-die is a bad failure to debug; not
+    // unlinking is the fix.
+    let listener = match inherited_listener(spec) {
+        Some(listener) => {
+            eprintln!(
+                "proxy-agent adopting the inherited socket at {}",
+                spec.path.display()
+            );
+            listener
+        }
+        None => {
+            if spec.path.exists() {
+                std::fs::remove_file(&spec.path)?;
+            }
+            if let Some(parent) = spec.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
 
-    let listener = UnixListener::bind(&spec.path)?;
-    set_socket_mode(&spec.path, spec.mode)?;
+            let listener = UnixListener::bind(&spec.path)?;
+            set_socket_mode(&spec.path, spec.mode)?;
+            listener
+        }
+    };
     // Announced once bound, not by the caller: a message printed before a bind
     // that then fails reports a listening agent that refused to start.
     eprintln!("proxy-agent listening on {}", spec.path.display());
@@ -623,6 +664,76 @@ async fn reject(mut stream: UnixStream, reason: &str) {
     }
 
     let _ = stream.shutdown().await;
+}
+
+/// Takes the listener the service manager passed, when there is one.
+///
+/// # Why the protocol lives in `proxy-sys`
+///
+/// Adopting a descriptor needs `FromRawFd`, which is unsafe, and this crate is
+/// `forbid(unsafe_code)`. Rather than relax that here, the handshake and the
+/// adoption live in `proxy_sys::verified_descriptors`, whose crate exists to
+/// contain exactly this kind of call behind a safe wrapper. What is left here is
+/// the policy: which spec may adopt, and what to say when the inherited socket's
+/// mode disagrees with what this build expects.
+///
+/// Returns `None` when nothing was passed — the ordinary case for a hand-run agent
+/// and for every test — or when this spec does not adopt.
+fn inherited_listener(spec: &SocketSpec) -> Option<UnixListener> {
+    if !spec.adoptable {
+        return None;
+    }
+
+    let descriptors = proxy_sys::verified_descriptors()?;
+
+    if descriptors.count() > 1 {
+        eprintln!(
+            "warning: {} sockets were passed but only the first is served; \
+             check that the socket unit declares one ListenStream",
+            descriptors.count()
+        );
+    }
+
+    let std_listener = descriptors.adopt_listening_socket(0).ok()?;
+
+    // The service manager cannot set a mode on a descriptor, only on the file it
+    // creates. A mismatch means the unit's SocketMode= and this build's expectation
+    // have drifted, which is worth a warning rather than a silent acceptance: the
+    // mode is what decides whether a local client can connect.
+    if let Ok(metadata) = std::fs::metadata(&spec.path) {
+        use std::os::unix::fs::PermissionsExt;
+        let actual = metadata.permissions().mode() & 0o7777;
+        if actual != spec.mode {
+            eprintln!(
+                "warning: the inherited socket at {} is mode {:o}, but this build \
+                 expects {:o}; check SocketMode= in the socket unit",
+                spec.path.display(),
+                actual,
+                spec.mode
+            );
+        }
+    }
+
+    // A non-blocking listener is what the async accept loop needs; the descriptor
+    // arrives blocking, and leaving it that way would block the runtime thread.
+    if let Err(e) = std_listener.set_nonblocking(true) {
+        eprintln!(
+            "warning: could not set the inherited socket non-blocking ({e}); \
+             falling back to binding a new socket"
+        );
+        return None;
+    }
+
+    match UnixListener::from_std(std_listener) {
+        Ok(listener) => Some(listener),
+        Err(e) => {
+            eprintln!(
+                "warning: the inherited socket could not be adopted ({e}); \
+                 falling back to binding a new socket"
+            );
+            None
+        }
+    }
 }
 
 /// Applies a mode to the socket file.

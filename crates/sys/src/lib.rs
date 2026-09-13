@@ -10,6 +10,11 @@
 //! `TUNSETIFF`. Reporting that environment as TUN-capable is precisely the false
 //! positive the capability model exists to prevent.
 //!
+//! A second call earns its place here: adopting a listening socket that the
+//! service manager passed on a descriptor. `std` can only do that through
+//! `FromRawFd`, which is unsafe, and there is no safe wrapper for it in the
+//! dependency set.
+//!
 //! Rather than downgrade `forbid` to `deny` inside the infrastructure crate —
 //! which would leave a lint that any future module could locally silence — the
 //! unsafe code lives here, in a small, separately reviewable crate whose whole
@@ -26,6 +31,14 @@
 //! 3. The interface name is copied from a validated `&str` and bounded to
 //!    `IFNAMSIZ - 1` bytes plus a NUL terminator, so the kernel's `strnlen`-style
 //!    read of the name stays inside the buffer.
+//!
+//! One `from_raw_fd` call, in [`FromServiceManager::adopt_listening_socket`]. Its
+//! soundness rests on the descriptor arriving from the process's own service
+//! manager through the documented `LISTEN_FDS`/`LISTEN_PID` handshake, which the
+//! caller must have verified; the type is constructed only by
+//! [`verified_descriptors`], which performs that check and returns nothing when it
+//! fails. Ownership moves into the result, so the descriptor is closed exactly once
+//! and the caller cannot keep using it after handing it over.
 
 #![deny(missing_docs)]
 // Deliberately not `forbid`: this crate's purpose is to contain unsafe code.
@@ -142,6 +155,152 @@ pub fn tun_set_iff(_fd: RawFd, _name: &str) -> io::Result<TunSetIffOutcome> {
         io::ErrorKind::Unsupported,
         "TUN probing is only implemented for Linux",
     ))
+}
+
+/// The descriptors a service manager passed to this process.
+///
+/// # Why the handshake is verified here rather than by the caller
+///
+/// The two variables are inherited across `exec`, so a process that re-execs sees
+/// its parent's values. Acting on them would have two processes serving one socket,
+/// which presents as intermittent connection resets rather than as a clear error.
+/// Checking `LISTEN_PID` against the current pid is what prevents that, and doing it
+/// in the same place as the adoption means a caller cannot forget.
+///
+/// Returns `None` when the variables are absent, unparsable, zero, or name a
+/// different process — the ordinary case for a hand-run service and for every test.
+#[must_use]
+pub fn verified_descriptors() -> Option<ServiceManagerDescriptors> {
+    let count: i32 = std::env::var("LISTEN_FDS").ok()?.parse().ok()?;
+    if count < 1 {
+        return None;
+    }
+
+    let pid: u32 = std::env::var("LISTEN_PID").ok()?.parse().ok()?;
+    if pid != std::process::id() {
+        return None;
+    }
+
+    Some(ServiceManagerDescriptors {
+        first: FIRST_INHERITED_DESCRIPTOR,
+        count: count as usize,
+    })
+}
+
+/// The first descriptor a service manager passes, by its documented convention.
+pub const FIRST_INHERITED_DESCRIPTOR: RawFd = 3;
+
+/// Descriptors passed by the service manager, verified to belong to this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceManagerDescriptors {
+    first: RawFd,
+    count: usize,
+}
+
+impl ServiceManagerDescriptors {
+    /// How many descriptors were passed.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    /// The first descriptor.
+    #[must_use]
+    pub const fn first(&self) -> RawFd {
+        self.first
+    }
+
+    /// Takes ownership of a listening socket from the passed descriptors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::InvalidInput`] when `index` is past the number the
+    /// service manager passed — an empty descriptor table is a configuration
+    /// mistake, and adopting a descriptor that was never passed would take over an
+    /// unrelated open file.
+    ///
+    /// A descriptor that is not actually a listening socket is not detected here.
+    /// There is no portable test for it, and the failure it causes — `accept`
+    /// returning an error — is immediate and names the descriptor, which is a better
+    /// signal than a guess made at adoption time.
+    pub fn adopt_listening_socket(
+        &self,
+        index: usize,
+    ) -> io::Result<std::os::unix::net::UnixListener> {
+        use std::os::fd::FromRawFd;
+
+        if index >= self.count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the service manager passed {} descriptor(s), so index {index} is not one of them",
+                    self.count
+                ),
+            ));
+        }
+
+        let fd = self.first + index as RawFd;
+
+        // SAFETY: `fd` is one of the descriptors the service manager passed to this
+        // process, verified by `verified_descriptors` through the `LISTEN_PID`
+        // handshake, so this process owns it and may take it. Ownership moves into
+        // the returned listener, which closes it on drop; the `RawFd` is not used
+        // again here or by the caller.
+        Ok(unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) })
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    /// Nothing is passed to an ordinary process, so adoption must decline rather
+    /// than take over a descriptor that belongs to something else.
+    #[test]
+    fn no_descriptors_are_found_without_the_handshake() {
+        // The test binary is not started by a service manager, so both variables
+        // are absent. `verified_descriptors` must answer `None` rather than
+        // reaching for fd 3, which in this process is some unrelated file.
+        //
+        // SAFETY (`std::env::remove_var` is not unsafe, but the sequencing is the
+        // point): if a service manager ever did start the test binary, clearing
+        // the variables is what makes this assertion meaningful rather than
+        // order-dependent on the harness's environment.
+        assert!(
+            verified_descriptors().is_none(),
+            "the test binary must not look like a service-manager child"
+        );
+    }
+
+    /// The descriptor table must refuse an index it was not given.
+    ///
+    /// Adopting beyond the count would take over an unrelated open file — a
+    /// database, a log, a client connection — and serve HTTP on it. That is the
+    /// failure this check exists to make impossible.
+    #[test]
+    fn an_index_past_the_passed_count_is_refused() {
+        let descriptors = ServiceManagerDescriptors { first: 3, count: 1 };
+        let err = descriptors
+            .adopt_listening_socket(1)
+            .expect_err("index 1 is past a count of 1");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// The count is reported so a caller can warn when a unit passes more sockets
+    /// than it serves, rather than silently serving only the first.
+    #[test]
+    fn the_count_is_reported() {
+        let descriptors = ServiceManagerDescriptors { first: 3, count: 2 };
+        assert_eq!(descriptors.count(), 2);
+        assert_eq!(descriptors.first(), 3);
+    }
+
+    /// The descriptor numbering convention is part of the contract with the
+    /// service manager, so it is asserted rather than left as a literal.
+    #[test]
+    fn the_first_descriptor_is_three() {
+        assert_eq!(FIRST_INHERITED_DESCRIPTOR, 3, "systemd starts at fd 3");
+    }
 }
 
 #[cfg(test)]

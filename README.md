@@ -136,29 +136,39 @@ The prebuilt binary has no runtime dependencies. Building from source needs Rust
 ## Quick start
 
 ```bash
-# 1. Start the agent
-sudo systemctl start proxy-agent
-
-# 2. Install a kernel. The version is required — there is no "latest" shorthand,
+# 1. Install a kernel. The version is required — there is no "latest" shorthand,
 #    because the agent verifies the artifact against a checksum and picking a
-#    version is a decision rather than a default.
+#    version is a decision rather than a default. This command also brings the
+#    agent up on demand; there is no separate step to start it.
 proxyctl mihomo update v1.19.30
 
-# 3. See what this environment can actually do
+# 2. See what this environment can actually do
 proxyctl doctor
 
-# 4. Start the kernel
+# 3. Start the kernel
 proxyctl start
 ```
 
 No `sudo` and no group membership: any local user can talk to the agent. See
 [Who can use it](#who-can-use-it).
 
-### Start the service, not the binary
+### Nothing to start
+
+There is no step where you start the agent. The socket unit is enabled, so systemd
+creates the socket at boot and starts the service the first time anything connects
+to it. Run any command and the agent is up:
 
 ```bash
-sudo systemctl start proxy-agent
+proxyctl status        # starts the agent on demand
 ```
+
+That is why no command needs `sudo`. Starting a service directly *does* — polkit
+treats `manage-units` as `auth_admin`, and an SSH session has no prompt to show, so
+`systemctl start` fails with "Access denied … requires interactive
+authentication". The socket unit exists so you never have to find that out.
+
+It also means the agent heals itself: systemd restarts it if it crashes, and the
+socket file survives because the socket unit owns it rather than the service.
 
 **Do not run `sudo proxyctl agent run`.** It appears to work — the socket is
 created and the agent prints that it is listening — and it puts you in a worse
@@ -172,17 +182,6 @@ place than not starting it at all:
 
 The unit exists for exactly this reason: it names the user, creates the runtime
 directory with the right mode, and grants only `CAP_NET_ADMIN`.
-
-If `systemctl start` fails with **"Access denied … requires interactive
-authentication"**, that is polkit, not your password. `systemctl` asks polkit for
-`manage-units`, whose default is `auth_admin` — an interactive prompt — and a
-non-interactive session has no prompt to show it. This is common over SSH, where
-no polkit agent is registered for the session. Use `sudo`, which does not go
-through polkit at all:
-
-```bash
-sudo systemctl start proxy-agent
-```
 
 ### Who can use it
 
@@ -398,6 +397,7 @@ makes it testable without any of them.
 /var/lib/proxy-agent/configs/       immutable versions
 /var/lib/proxy-agent/database.sqlite
 /run/proxy-agent/agent.sock         the agent        (0666; any local user)
+                                    created by proxy-agent.socket, not the agent
 /run/proxy-agent/mihomo.sock        the kernel       (0666; upstream hardcodes it)
 ```
 

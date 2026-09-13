@@ -117,27 +117,33 @@ Linux + systemd，架构为 `x86_64` 或 `aarch64`。实测过的是 Debian/Ubun
 ## 快速开始
 
 ```bash
-# 1. 启动 agent
-sudo systemctl start proxy-agent
-
-# 2. 安装内核。版本号是必填的 —— 没有 "latest" 简写，
+# 1. 安装内核。版本号是必填的 —— 没有 "latest" 简写，
 #    因为 agent 会校验产物的 checksum，且选择哪个版本是一个决定，而非默认值。
+#    这条命令会按需把 agent 拉起来。
 proxyctl mihomo update v1.19.30
 
-# 3. 看看这个环境实际能做什么
+# 2. 看看这个环境实际能做什么
 proxyctl doctor
 
-# 4. 启动内核
+# 3. 启动内核
 proxyctl start
 ```
 
 不需要 `sudo`，也不需要加入任何组：本机任何用户都能直接使用 agent。见[谁能用](#谁能用)。
 
-### 用服务启动，而不是直接跑二进制
+### 不需要启动
+
+**没有"启动 agent"这一步。** socket unit 已 enable，systemd 开机就创建 socket，并在第一次有东西连上来时拉起服务。直接跑命令就行：
 
 ```bash
-sudo systemctl start proxy-agent
+proxyctl status        # 按需拉起 agent
 ```
+
+这就是为什么所有命令都不需要 `sudo`。而直接启动服务**是**需要的 —— polkit 把 `manage-units` 当作 `auth_admin`，SSH 会话没有可以弹提示的地方，所以 `systemctl start` 会报 "Access denied … requires interactive authentication"。socket unit 的存在就是为了让你不必碰到这件事。
+
+它还让 agent 能自愈：崩溃时 systemd 会重启它；socket 文件由 socket unit 而非服务持有，所以服务停了 socket 也还在。
+
+**不要运行 `sudo proxyctl agent run`。** 它看起来能跑 —— socket 建出来了，agent 也打印了监听地址 —— 但结果比不启动更糟：
 
 **不要运行 `sudo proxyctl agent run`。** 它看起来能跑 —— socket 建出来了，agent 也打印了监听地址 —— 但结果比不启动更糟：
 
@@ -146,12 +152,6 @@ sudo systemctl start proxy-agent
 * 状态目录和配置目录会落在你当时所在的目录，而不是打包好的位置。
 
 unit 存在的理由就是这个：它指定了用户、用正确的权限创建运行目录、并且只授予 `CAP_NET_ADMIN`。
-
-如果 `systemctl start` 报 **"Access denied … requires interactive authentication"**，那是 polkit，不是你的密码错了。`systemctl` 会向 polkit 申请 `manage-units`，其默认策略是 `auth_admin`（交互式认证），而非交互式会话没有可以弹出提示的地方。SSH 下很常见 —— 该会话没有注册 polkit agent。用 `sudo` 即可，它根本不经过 polkit：
-
-```bash
-sudo systemctl start proxy-agent
-```
 
 ### 谁能用
 

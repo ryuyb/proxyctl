@@ -299,20 +299,24 @@ install -m 0755 "$TMP/$BINARY" "${BIN_DIR}/${BINARY}"
 # Only when it actually differs: replacing it rewrites `Documentation=` in the
 # unit, and a needless write bumps the mtime that systemd uses to decide whether
 # a daemon-reload is needed.
-if [ -f "$TMP/proxy-agent.service" ]; then
-  step "Installing the systemd unit"
+# Both units, and both are needed. The socket unit is what is enabled and what
+# owns `/run/proxy-agent`; the service unit is started by systemd on the first
+# connection to that socket. Installing only the service would leave the user back
+# at `systemctl start`, which needs root or an interactive polkit prompt.
+UNIT_CHANGED=0
+for unit in proxy-agent.service proxy-agent.socket; do
+  [ -f "$TMP/$unit" ] || continue
+  step "Installing the systemd unit ${unit}"
   install -d -m 0755 "$UNIT_DIR"
-  if ! cmp -s "$TMP/proxy-agent.service" "${UNIT_DIR}/proxy-agent.service"; then
-    # `Documentation=` in the unit points at a path under `${PREFIX}`, so a
+  if ! cmp -s "$TMP/$unit" "${UNIT_DIR}/${unit}"; then
+    # `Documentation=` in the service unit points at a path under `${PREFIX}`, so a
     # non-default prefix has to be reflected or `systemd-analyze verify` reports a
     # missing file.
-    sed "s|/usr/share/doc/proxy-agent|${DOC_DIR}|g" "$TMP/proxy-agent.service" \
-      > "${UNIT_DIR}/proxy-agent.service"
+    sed "s|/usr/share/doc/proxy-agent|${DOC_DIR}|g" "$TMP/$unit" \
+      > "${UNIT_DIR}/${unit}"
     UNIT_CHANGED=1
-  else
-    UNIT_CHANGED=0
   fi
-fi
+done
 
 if [ -f "$TMP/config.toml.example" ]; then
   step "Installing the configuration example"
@@ -457,26 +461,18 @@ fi
 info ""
 info "${C_BOLD}Next:${C_RESET}"
 info ""
-info "  1. Review ${CONFIG}, then start the agent:"
-info "       ${C_DIM}sudo systemctl start proxy-agent${C_RESET}"
-info "     ${C_DIM}sudo${C_RESET} is not decoration: plain ${C_DIM}systemctl${C_RESET} goes through polkit, whose"
-info "     default for manage-units is interactive authentication. Over SSH there"
-info "     is no polkit agent to prompt, so it fails with \"Access denied\"."
-info "     Do not run \`sudo proxyctl agent run\` instead. It appears to work — the"
-info "     socket is created and it prints that it is listening — but the process"
-info "     is in your terminal, so Ctrl-C leaves a socket with no listener, and"
-info "     \`systemctl\` can neither see nor restart it."
-info ""
-info "  2. Install a Mihomo kernel — this installer deliberately does not."
-info "     The version is required: the agent verifies the checksum, and picking"
-info "     one is a decision rather than a default. Any release tag will do."
+info "  1. Install a Mihomo kernel. The version is required: the agent verifies"
+info "     the checksum, and picking one is a decision rather than a default."
 info "       ${C_DIM}proxyctl mihomo update v1.19.30${C_RESET}"
 info ""
-info "  3. Check the environment before trusting it:"
+info "  2. Check the environment before trusting it:"
 info "       ${C_DIM}proxyctl doctor${C_RESET}"
 info ""
-info "  4. The web interface needs a session, which needs a token:"
+info "  3. The web interface needs a session, which needs a token:"
 info "       ${C_DIM}proxyctl token issue --principal admin${C_RESET}"
 info "     To reach it from another machine, set [api] bind in the config."
 info "     Over TCP a token is required — there is no loopback exemption."
 info ""
+info "  There is no step that starts the agent. The socket unit is enabled, so the"
+info "  first ${C_DIM}proxyctl${C_RESET} command starts the service on demand, and systemd"
+info "  restarts it if it dies. Nothing above needs ${C_DIM}sudo${C_RESET} or ${C_DIM}systemctl${C_RESET}."

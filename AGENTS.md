@@ -608,6 +608,28 @@ deliberate: the client is meant to work without anyone being added to a dedicate
 group. On a multi-user host that means every local user can manage the kernel, so
 a deployment that cares must narrow it — either the socket mode or a peer check.
 
+**The socket is created by the service manager, not the agent.** `proxy-agent.socket`
+listens on the agent's path and starts `proxy-agent.service` on the first
+connection, which is what removes `sudo systemctl` from the operator's path: asking
+someone to start a unit needs root, because polkit's `manage-units` default is
+`auth_admin` and an SSH session has no prompt. Three consequences are load-bearing:
+
+* the agent adopts the descriptor from `LISTEN_FDS` (verified against `LISTEN_PID`)
+  instead of calling `bind`, and must not unlink what is already at the path — that
+  file belongs to systemd, and removing it breaks the next start rather than the
+  current one;
+* the *service* unit declares `RuntimeDirectory=` because a socket unit ignores
+  `User=`, so a directory created there is `root:root` and the unprivileged service
+  cannot chmod or clear the socket inside it. Measured: it crash-looped;
+* that directory needs `RuntimeDirectoryPreserve=yes`, or stopping the service
+  deletes the socket unit's listening file while the socket unit still reports
+  itself `active`. Measured: the next client got `ECONNREFUSED` with no recovery
+  short of restarting the socket unit.
+
+The directory check in `composition.rs` compares modes rather than ownership for
+the same reason: requiring the service user to own a directory systemd created as
+root made a correct deployment refuse to start.
+
 **The kernel socket is not protected, and that is a known accepted risk.** Mihomo
 hardcodes `chmod 0666` on its controller socket and does not verify its `secret`
 over a unix socket, so `mihomo.sock` is world-writable and the agent cannot tighten

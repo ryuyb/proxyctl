@@ -1165,6 +1165,7 @@ dependencies = [
  "nix",
  "proxy-application",
  "proxy-domain",
+ "proxy-sys",
  "serde",
  "serde_json",
  "tempfile",

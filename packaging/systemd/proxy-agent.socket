@@ -1,0 +1,49 @@
+[Unit]
+Description=Mihomo management agent socket
+# This unit exists so that using the agent never requires `sudo systemctl`.
+#
+# systemd creates and owns the listening socket, and starts the service the first
+# time anything connects to it. A plain `proxyctl status` therefore brings the
+# agent up on demand, with no privilege on the caller's part — whereas asking the
+# user to run `systemctl start` needs root or an interactive polkit prompt, which
+# an SSH session cannot show.
+#
+# It also makes the agent self-healing in a way the service unit alone cannot:
+# while the agent binds its own socket, a crash *or a stop* removes the socket
+# file, and every client then sees "connection refused" with no way to recover.
+# Holding the socket here means the file survives the service, so the next command
+# starts it again.
+Before=proxy-agent.service
+
+[Socket]
+# The same path the service would otherwise bind. One of the two creates it:
+# systemd when this unit is active, the agent itself when it is not.
+ListenStream=/run/proxy-agent/agent.sock
+
+# Any local user may connect. The agent authenticates the caller itself and does
+# not treat the file mode as the boundary, so a narrower mode here would only lock
+# clients out — which is the group dance this design avoids. See AGENTS.md,
+# "Unix socket", for what that trades away.
+SocketMode=0666
+
+# The directory is created by the *service* unit's `RuntimeDirectory=`, not here,
+# and that division is forced rather than chosen: a socket unit ignores `User=` and
+# `Group=`, so a `RuntimeDirectory=` declared here is created `root:root`. The
+# service runs as `proxy-agent` and must own that directory — it removes the socket
+# on shutdown and enforces the mode — so a root-owned directory makes it fail to
+# start, repeatedly, under `Restart=on-failure`.
+#
+# Measured: with `RuntimeDirectory=` here the service crash-looped with
+# "its mode must be 751 ... could not be set (Operation not permitted)".
+#
+# `DirectoryMode=` still applies to this unit's own socket file, and the directory
+# is traversable because the service creates it 0751.
+DirectoryMode=0755
+
+# systemd removes the socket file when this unit stops. That is what makes a
+# `systemctl stop` really stop accepting connections rather than leaving a socket
+# a client could still reach.
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

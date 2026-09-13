@@ -9,6 +9,14 @@ Documentation=file:/usr/share/doc/proxy-agent/config.toml.example
 After=network-online.target
 Wants=network-online.target
 
+# `Requires=` rather than `Wants=`: the socket unit hands over a listening
+# descriptor, and the service is written to adopt it when one is present. Starting
+# the service without the socket would still work — it falls back to binding — but
+# the pair is the supported configuration, and refusing to run half of it is
+# clearer than silently choosing the other code path.
+Requires=proxy-agent.socket
+After=proxy-agent.socket
+
 [Service]
 Type=simple
 # The agent runs as its own unprivileged user. TUN and nftables need
@@ -27,22 +35,43 @@ Group=proxy-agent
 ExecStart=/usr/bin/proxyctl agent run --config /etc/proxy-agent/config.toml
 
 # systemd owns the directories so their modes are not a matter of install-time
-# luck.
+# luck. The state and configuration directories stay 0700: they hold the database,
+# the kernel secret, and stored configs, which no local user should read.
 #
-# `/run/proxy-agent` is 0755 because it must be *traversable* by any local user:
-# `agent.sock` is mode 0666 and authenticates its caller itself, so a 0750
-# directory would block the client before it could present anything — the group
-# dance this design exists to avoid. The state and configuration directories stay
-# 0700: they hold the database, the kernel secret, and stored configs, and no
-# local user should read them.
+# `/run/proxy-agent` is declared here, and the ownership is why: a socket unit
+# ignores `User=`/`Group=`, so a `RuntimeDirectory=` in `proxy-agent.socket` would
+# be created `root:root` and the service — which runs as `proxy-agent` and must
+# remove and re-mode the socket inside it — would fail to start. Measured: it
+# crash-looped on "its mode must be 751 ... Operation not permitted".
 #
-# Note that this also exposes `mihomo.sock`, which is not protected: upstream
-# hardcodes `chmod 0666` on the kernel's controller socket and verifies no secret
-# over a unix socket, so any local user can `PUT /configs` and replace the running
-# configuration. A 0750 directory used to block that; a traversable one does not.
-# Accepted for single-user hosts and containers — see AGENTS.md, "Unix socket".
+# The directory is traversable (0751) rather than 0750 for the reason this whole
+# change exists: the socket inside it is meant to be reachable by any local user.
+#
+# A hand-written install that skips systemd must create it itself:
+#
+#   install -d -o proxy-agent -g proxy-agent -m 0751 /run/proxy-agent
+#
+# Note that a traversable runtime directory also exposes `mihomo.sock`, which is
+# not protected: upstream hardcodes `chmod 0666` on the kernel's controller socket
+# and verifies no secret over a unix socket, so any local user can `PUT /configs`
+# and replace the running configuration. A 0750 directory used to block that; a
+# traversable one does not. Accepted for single-user hosts and containers — see
+# AGENTS.md, "Unix socket".
 RuntimeDirectory=proxy-agent
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0751
+# The directory must outlive this service, because it holds the socket unit's
+# listening file. Without this, `systemctl stop proxy-agent` removes
+# `/run/proxy-agent` — systemd deletes a runtime directory when its owning unit
+# stops — while `proxy-agent.socket` stays `active` and reports itself as
+# listening on a path that no longer exists. The next client then gets
+# `ECONNREFUSED` with nothing to retry, and no command can recover it until the
+# socket unit is restarted. Measured: exactly that, with the socket unit active and
+# the directory absent.
+#
+# The socket unit owns the lifetime instead: it creates the directory before the
+# socket and removes both when *it* stops, which is the pair that should disappear
+# together.
+RuntimeDirectoryPreserve=yes
 StateDirectory=proxy-agent
 StateDirectoryMode=0700
 ConfigurationDirectory=proxy-agent
@@ -106,4 +135,8 @@ AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 
 [Install]
+# Not `multi-user.target`. The socket unit is what is enabled, and it starts this
+# service on the first connection — so the agent costs nothing at boot and there is
+# no window where the socket exists without a service behind it. Enabling this
+# directly as well is harmless but unnecessary.
 WantedBy=multi-user.target
