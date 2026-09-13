@@ -658,7 +658,26 @@ async fn install_binary_atomically(source: &Path, target: &Path) -> Result<(), P
     tokio::task::spawn_blocking(move || -> Result<(), PortError> {
         // The temporary lives in the *target* directory, so the rename cannot
         // cross a filesystem boundary and stop being atomic.
-        let staging = directory.join(format!(".install-{}.tmp", std::process::id()));
+        //
+        // The name is unique per call, not per process. It used to be
+        // `.install-{pid}.tmp`, which is unique only while one install is in
+        // flight: both `install` and `rollback` reach here, and two of them
+        // overlapping — a rollout while a rollback is running, or two tests in
+        // one process — staged to the same path. The second copy then wrote to a
+        // file the first was still using, and `set_executable` on it failed with
+        // `ETXTBSY` ("Text file busy") for the loser. Measured on CI, where it
+        // presented as "the artifact is not executable", which points at the
+        // wrong thing entirely.
+        //
+        // A counter plus the pid keeps the name unique within the process and
+        // between processes, and stays predictable enough to reason about. A
+        // random suffix would work as well; the counter makes a leak obvious,
+        // because a leftover staging file keeps a name that says which call made
+        // it.
+        static STAGING_SEQUENCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let sequence = STAGING_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = directory.join(format!(".install-{}-{sequence}.tmp", std::process::id()));
 
         std::fs::copy(&source, &staging).map_err(|e| {
             PortError::Storage(format!(
