@@ -1,0 +1,130 @@
+name: CI
+
+# The gates `AGENTS.md` names, run on every push and pull request. The point is
+# not to catch what a developer would have caught anyway — it is to catch what
+# they cannot: the front-end gate and the Rust gate are separate toolchains, so a
+# change touching both has to pass two suites that a single local run usually
+# does not.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  # A new push supersedes the previous run. Cheap and always correct here,
+  # because nothing in this pipeline publishes anything.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The `frontend/admin/dist` directory is absent in a fresh checkout, which
+      # is deliberate — the build script records an empty bundle and warns rather
+      # than failing, so a backend-only checkout still builds. This job therefore
+      # exercises exactly that path, which is worth doing on every run: it is the
+      # path a contributor hits first.
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --workspace
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      # `check` is typecheck, lint, test, then a production build. The typecheck
+      # is the one that matters most: `zh.ts` is typed against `en.ts`, so a
+      # missing translation is a compile error rather than a string that silently
+      # falls back to its own key.
+      - name: Check
+        run: pnpm --dir frontend/admin check
+
+  # Both interfaces must survive an embedding build. This runs the two front-end
+  # builds and then asserts the Rust build script picked them up — the failure it
+  # catches is a release whose web UI is a placeholder page, which no other job
+  # would notice.
+  embedding:
+    name: Embedding
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build the operator interface
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend/admin build
+
+      # Needs the network, and this job is the only one that does. Kept separate
+      # rather than added to the Rust job so a flaky upstream fetch cannot make
+      # the ordinary test run fail.
+      - name: Fetch the dashboard artifact
+        run: ./scripts/fetch-metacubexd.sh --strict
+
+      - name: Build
+        run: cargo build -p proxyctl
+
+      - name: Assert both interfaces were embedded
+        run: |
+          set -euo pipefail
+          generated=$(find target/debug/build -name assets_bundle.rs | head -1)
+          [ -n "$generated" ] || { echo "the build script produced nothing" >&2; exit 1; }
+          count=$(grep -c 'include_bytes' "$generated")
+          echo "embedded $count files"
+          # 167 = 7 from the operator interface + 160 from the dashboard.
+          [ "$count" -ge 100 ] || {
+            echo "expected both interfaces, found $count" >&2
+            grep -E 'BUNDLE: Option' "$generated" >&2
+            exit 1
+          }
+          grep -q 'METACUBEXD_PREFIX: &str = "/ui"' "$generated" \
+            || { echo "the dashboard prefix is wrong" >&2; exit 1; }

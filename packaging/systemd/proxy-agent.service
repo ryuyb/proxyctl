@@ -65,7 +65,22 @@ SystemCallErrorNumber=EPERM
 # The directories the agent legitimately writes, re-opened read-write over
 # `ProtectSystem=strict`. Deliberately does not include /etc: configuration is
 # read, never written, so a compromised agent cannot rewrite its own policy.
-ReadWritePaths=/var/lib/proxy-agent /var/lib/proxy-agent/mihomo /run/proxy-agent
+#
+# `/usr/lib/proxy-agent` is listed because `kernel.binary` defaults to a path
+# under it and the agent *installs the kernel there* (`proxyctl mihomo
+# install`), replacing it wholesale on an upgrade. Without this, `ProtectSystem=
+# strict` makes that directory read-only and every kernel install fails with
+# `Permission denied` while the unit reports only an exit code.
+#
+# The directory therefore has to exist before the first start, owned by the
+# service user. `install.sh` creates it; a hand-written install must too:
+#
+#   install -d -o proxy-agent -g proxy-agent -m 0755 /usr/lib/proxy-agent
+#
+# A deployment that points `kernel.binary` somewhere else — a
+# distribution-packaged kernel, say — should replace this with that path, or
+# drop the entry if the kernel is only ever read.
+ReadWritePaths=/var/lib/proxy-agent /var/lib/proxy-agent/mihomo /run/proxy-agent /usr/lib/proxy-agent
 
 # --- capabilities ------------------------------------------------------------
 # CAP_NET_ADMIN is what TUN creation and firewall writes need, and it is the

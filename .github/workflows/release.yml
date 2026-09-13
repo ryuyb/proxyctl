@@ -1,0 +1,148 @@
+name: Release
+
+# Tag-driven. A release is cut by pushing a tag, which is why the version in the
+# tag and the artifact name cannot drift: they come from the same string.
+#
+# `cargo build` is not enough on its own for a release — the binary embeds two
+# browser interfaces, and neither the front-end bundle nor the dashboard is in
+# the repository. A release built without them would ship a binary whose web UI
+# is a placeholder, and nothing would report the mistake. So both are produced
+# here, before the Rust build, and the step after the build proves they landed.
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual runs, for testing the pipeline without cutting a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `ubuntu-latest` is x86_64, and cross-compiles to aarch64 with the
+          # distribution's gcc. No Docker and no emulation: the only reason this
+          # is not a native aarch64 runner is cost, and the code has no
+          # architecture-specific paths beyond the `ioctl` wrapper.
+          - target: x86_64-unknown-linux-gnu
+            arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install the cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The front-end toolchain. Pinned to the version in `package.json` so a
+      # release build and a developer's build produce the same bundle.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build the operator interface
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend/admin build
+
+      # Fetched rather than built: upstream publishes exactly this directory as
+      # its static release, and building Nuxt here would add a second Node
+      # toolchain and a Google Fonts dependency to every release.
+      #
+      # `--strict` because this is a release. The script tolerates a missing
+      # artifact by default so a developer without network is not blocked; here,
+      # a dashboard that did not arrive must fail the build rather than ship a
+      # placeholder.
+      - name: Fetch the dashboard artifact
+        run: ./scripts/fetch-metacubexd.sh --strict
+
+      - name: Build
+        run: cargo build --release --locked -p proxyctl --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      # The embedding is a build-script decision, and a build script that found
+      # nothing does not fail — it records an empty bundle and warns. This is the
+      # step that turns that warning into an error, and it is worth the twenty
+      # lines: the failure it catches is a release whose entire web interface is
+      # a page saying the interface was not built.
+      - name: Verify both interfaces were embedded
+        run: |
+          set -euo pipefail
+          generated=$(find target/${{ matrix.target }}/release/build -name assets_bundle.rs | head -1)
+          if [ -z "$generated" ]; then
+            echo "no generated bundle was found; the build script did not run" >&2
+            exit 1
+          fi
+          count=$(grep -c 'include_bytes' "$generated")
+          echo "embedded $count files"
+          # 7 from the operator interface, 160 from the dashboard. Well above the
+          # 1 that a placeholder-only bundle would contain.
+          if [ "$count" -lt 100 ]; then
+            echo "expected both interfaces, found only $count files" >&2
+            cat "$generated" | grep -E 'BUNDLE: Option' >&2
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          # A tag run strips the leading `v`; a manual run has no tag, so the
+          # crate version is used. Both produce a plain semantic version, so a
+          # manual artifact and a tagged one have the same shape.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name=="proxyctl") | .version')
+          fi
+          name="proxyctl-${version}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/proxyctl "dist/$name/"
+          cp packaging/config.toml.example "dist/$name/"
+          cp packaging/systemd/proxy-agent.service "dist/$name/"
+          cp frontend/metacubexd/UPSTREAM_VERSION "dist/$name/METACUBEXD_VERSION"
+          ( cd dist && tar czf "$name.tar.gz" "$name" )
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+          echo "PACKAGE=$name" >> "$GITHUB_ENV"
+          ls -la dist/
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          # Pre-release until the project says otherwise: the deb, the install
+          # script, and the kernel acquisition path are not all done, and a
+          # release marked "latest" would be fetched by the install script.
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
