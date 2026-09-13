@@ -35,7 +35,6 @@ use async_trait::async_trait;
 use proxy_domain::shared::time::Timestamp;
 
 use crate::ports::error::PortError;
-use crate::ports::secret_store::Role;
 
 /// One live connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,8 +63,9 @@ pub struct ConnectionView {
     /// Path of the originating process's executable, when readable.
     ///
     /// The most sensitive field in this record: together with the destination it
-    /// identifies which local program contacted what. Never exposed to a
-    /// read-only caller — see [`ConnectionView::redact_for`].
+    /// identifies which local program contacted what. It is returned to any caller
+    /// that can reach the agent, because the interface no longer models a
+    /// restricted caller — see [`crate::ports::Principal`].
     pub process_path: Option<String>,
     /// When the connection was established.
     pub started_at: Option<Timestamp>,
@@ -77,35 +77,6 @@ pub struct ConnectionView {
     pub inbound: Option<String>,
 }
 
-impl ConnectionView {
-    /// Returns this view with the process-identifying fields removed.
-    ///
-    /// # Why this is a call rather than an absent field
-    ///
-    /// Hiding the fields by leaving them unpopulated would work, and would be
-    /// invisible: a future consumer reading `view.uid` would have no reason to
-    /// suspect that a permission check was supposed to happen first. Making it an
-    /// explicit transformation means every path that hands a view to a caller has
-    /// to say which role it is for, and a test can assert the transformation
-    /// actually clears the fields rather than relying on them never being set.
-    ///
-    /// Administrative callers get the view unchanged. Everyone else loses the
-    /// three process-identifying fields, which together answer "which local
-    /// program contacted what" — a question that is not theirs to ask.
-    #[must_use]
-    pub fn redact_for(&self, role: Role) -> Self {
-        if role == Role::Admin {
-            return self.clone();
-        }
-        Self {
-            uid: None,
-            process: None,
-            process_path: None,
-            ..self.clone()
-        }
-    }
-}
-
 /// The current connection list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionList {
@@ -115,22 +86,6 @@ pub struct ConnectionList {
     pub download_total: u64,
     /// Active connections.
     pub connections: Vec<ConnectionView>,
-}
-
-impl ConnectionList {
-    /// Returns the list with process identity removed from every connection.
-    #[must_use]
-    pub fn redact_for(&self, role: Role) -> Self {
-        Self {
-            upload_total: self.upload_total,
-            download_total: self.download_total,
-            connections: self
-                .connections
-                .iter()
-                .map(|c| c.redact_for(role))
-                .collect(),
-        }
-    }
 }
 
 /// What the kernel did with a close request.
@@ -209,71 +164,17 @@ mod tests {
         }
     }
 
+    /// Process identity is part of the view, unconditionally.
+    ///
+    /// This was previously withheld from a read-only caller. There is no such
+    /// caller now, and the test is kept so that adding a redaction back is a
+    /// deliberate act rather than something a refactor can reintroduce silently.
     #[test]
-    fn an_admin_sees_the_process_identity() {
-        let redacted = view().redact_for(Role::Admin);
-        assert_eq!(redacted.uid, Some(1000));
-        assert_eq!(redacted.process.as_deref(), Some("curl"));
-        assert_eq!(redacted.process_path.as_deref(), Some("/usr/bin/curl"));
-    }
-
-    /// The fields a read-only caller must not receive, asserted individually so a
-    /// failure names which one leaked.
-    #[test]
-    fn a_read_only_caller_loses_every_process_identifying_field() {
-        let redacted = view().redact_for(Role::ReadOnly);
-        assert!(redacted.uid.is_none(), "uid leaked");
-        assert!(redacted.process.is_none(), "process leaked");
-        assert!(redacted.process_path.is_none(), "process_path leaked");
-    }
-
-    /// Redaction removes identity and nothing else: the connection remains
-    /// observable, which is the whole point of showing a read-only caller a list.
-    #[test]
-    fn redaction_keeps_everything_that_is_not_process_identity() {
-        let original = view();
-        let redacted = original.redact_for(Role::ReadOnly);
-        assert_eq!(redacted.id, original.id);
-        assert_eq!(redacted.source, original.source);
-        assert_eq!(redacted.destination, original.destination);
-        assert_eq!(redacted.rule, original.rule);
-        assert_eq!(redacted.rule_payload, original.rule_payload);
-        assert_eq!(redacted.chains, original.chains);
-        assert_eq!(redacted.upload, original.upload);
-        assert_eq!(redacted.download, original.download);
-        assert_eq!(redacted.started_at, original.started_at);
-        assert_eq!(redacted.inbound, original.inbound);
-    }
-
-    /// The list-level helper must reach every entry, not just the first.
-    #[test]
-    fn the_list_redaction_reaches_every_connection() {
-        let list = ConnectionList {
-            upload_total: 100,
-            download_total: 200,
-            connections: vec![view(), view()],
-        };
-        let redacted = list.redact_for(Role::ReadOnly);
-        assert_eq!(redacted.connections.len(), 2);
-        for connection in &redacted.connections {
-            assert!(connection.uid.is_none(), "{connection:?}");
-            assert!(connection.process_path.is_none(), "{connection:?}");
-        }
-        // The totals are not identity and must survive.
-        assert_eq!(redacted.upload_total, 100);
-        assert_eq!(redacted.download_total, 200);
-    }
-
-    /// An admin's list is unchanged, so the redaction cannot accidentally strip a
-    /// field the administrative view is supposed to have.
-    #[test]
-    fn an_administrative_list_is_unchanged() {
-        let list = ConnectionList {
-            upload_total: 1,
-            download_total: 2,
-            connections: vec![view()],
-        };
-        assert_eq!(list.redact_for(Role::Admin), list);
+    fn process_identity_is_part_of_the_view() {
+        let view = view();
+        assert_eq!(view.uid, Some(1000));
+        assert_eq!(view.process.as_deref(), Some("curl"));
+        assert_eq!(view.process_path.as_deref(), Some("/usr/bin/curl"));
     }
 
     #[test]
@@ -286,8 +187,6 @@ mod tests {
             view.uid.is_none(),
             "unreadable identity must be representable"
         );
-        // And a second redaction is a no-op rather than an error.
-        assert_eq!(view.redact_for(Role::ReadOnly), view);
     }
 
     /// An unmatched connection still has to be representable: the kernel reports
@@ -298,7 +197,6 @@ mod tests {
         view.rule = None;
         view.rule_payload = None;
         assert!(view.rule.is_none());
-        assert_eq!(view.redact_for(Role::ReadOnly).rule, None);
     }
 
     #[test]

@@ -68,7 +68,10 @@
 ```
 
 - 反代**剥离**浏览器带来的 `Authorization`，**注入**真实 mihomo secret。所以 UI 里填的 secret 是占位符，填什么都行。
-- 反代要求 **ADMIN 角色**（按用户选择）。这比 admin 页面更严格是合理的：`/clash-api` 的 `PUT /configs` 能热改运行中配置，等于内核完全控制权（R07 §3.6）。**只读会话必须被拒绝**，否则等于把只读提升为内核管理员。
+- 反代**只放行只读方法**（`GET`/`HEAD`/`OPTIONS`），其余 403。这个门是必要的：`/clash-api` 的 `PUT /configs` 能热改运行中配置，等于内核完全控制权（R07 §3.6），而一个能打开该路径的页面不该有能力触发它。
+
+  > 实现时这里写的是「要求 ADMIN 角色、拒绝只读会话」。角色模型已删除（ADR-010 D12），
+  > 门改为**纯粹按 HTTP 方法**判定 —— 它防的是「什么请求」，不是「谁在问」。
 - mihomo controller 保持 `127.0.0.1` 或 unix socket，不对外暴露（R07 §4.2）。
 
 ### D4. WebSocket — **必须做真正的 upgrade 透传**（✅ 已 spike 验证）
@@ -148,7 +151,7 @@
 | ③ ✅ | `build.rs` 双 bundle | `cargo build` 后检查生成的 bundle 常量含 154 个条目 |
 | ④ ✅ | `/ui` 静态路由 + CSP | curl 验证 `index.html`、`_nuxt/*`、缺失资源 404 |
 | ⑤ ✅ | `/api/control/info` → 404 | curl 验证，并在浏览器确认 Profile/控制页消失 |
-| ⑥ ✅ | `/clash-api` HTTP 反代 + 按方法分流 | curl 用只读 token 确认 403；admin token 确认能拿到 `/version` |
+| ⑥ ✅ | `/clash-api` HTTP 反代 + 按方法分流 | curl 确认 `PUT`/`POST` → 403，`GET /version` → 200（门按方法判定，不再按角色） |
 | ⑦ ✅ | 浏览器端到端 | Playwright：填占位 secret 能连上，overview/traffic/logs 三页有数据 |
 | ⑧ ✅ | 文档 + ADR | 更新 ADR-006、Q016 关闭、R13 补 Highcharts 授权结论 |
 
@@ -206,10 +209,14 @@ WebSocket（真实浏览器，零错误）
   OPEN /clash-api/memory
   OPEN /clash-api/logs
 
-权限分流
-  admin:     GET → 200, WS → 101, PUT/POST → 放行
-  read-only: GET → 200, WS → 101（收到真实流量帧）, PUT/POST → 403
+方法门（不区分调用方身份）
+  GET/HEAD/OPTIONS: 转发 → 200；WS → 101（收到真实流量帧）
+  PUT/POST/其他:    403
 ```
+
+> 实测时这里是按「admin / read-only 两种角色」验证的。角色模型已删除
+> （ADR-010 D12）：该门现在只按 **HTTP 方法** 判定，因为它的作用是防止页面
+> 直接 `PUT /configs` 替换内核运行配置，与调用方是谁无关。
 
 浏览器逐页确认数据来自内核：代理组 `GLOBAL | 2/2`、配置页显示内核版本 `v1.19.30`、
 规则页 `Match → DIRECT`。
@@ -258,3 +265,8 @@ WebSocket（真实浏览器，零错误）
 
    我倾向 **(b)**：它与我们 admin 界面的既定边界一致（只读能看状态、不能操作），
    且实现成本只是判断 `method` 是否在只读白名单里。
+
+   > **最终落地的是 (b)，但只保留了「方法白名单」这一半。** 角色模型整体删除后
+   > （ADR-010 D12），分流不再比较调用方角色 —— 只读方法转发，其余一律 403。
+   > 上一段里「要求 ADMIN」的那一半已不存在；(a)/(c) 所依赖的「只读会话」概念
+   > 也一并消失。

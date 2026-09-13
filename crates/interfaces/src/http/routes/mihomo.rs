@@ -10,7 +10,6 @@ use proxy_domain::shared::time::Timestamp;
 use serde::Serialize;
 
 use crate::dto::{MihomoStatusDto, ProxiesDto};
-use crate::http::auth::require_write;
 use crate::http::error::HttpError;
 use crate::http::state::{AppState, Caller};
 
@@ -73,7 +72,8 @@ pub async fn start(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<LifecycleDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let now = now();
     let outcome = StartMihomo::execute(&state.ctx, now).await?;
     Ok(Json(describe_start(&outcome)))
@@ -88,7 +88,8 @@ pub async fn stop(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<LifecycleDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let now = now();
     let outcome = StopMihomo::execute(&state.ctx, now).await?;
     Ok(Json(match outcome {
@@ -122,7 +123,8 @@ pub async fn restart(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<LifecycleDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let now = now();
     let outcome = RestartMihomo::execute(&state.ctx, now).await?;
     Ok(Json(describe_start(&outcome)))
@@ -137,7 +139,8 @@ pub async fn reload(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<LifecycleDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let now = now();
     let outcome = ReloadMihomo::execute(&state.ctx, now).await?;
     Ok(Json(LifecycleDto {
@@ -169,7 +172,8 @@ pub async fn update(
     caller: Caller,
     body: Option<Json<UpdateKernelBody>>,
 ) -> Result<Json<KernelDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
 
     // Without a version, report what is installed: "update" with no target is a
     // status question, not a request to guess a version.

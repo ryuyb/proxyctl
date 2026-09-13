@@ -47,7 +47,7 @@ pub use mihomo_observer::{BoxStream, LogEntry, MemorySample, MihomoObserver, Tra
 pub use process_manager::{
     AllowedSignal, ExitStatus, ProcessHandle, ProcessManager, ProcessStatus, StartOptions,
 };
-pub use secret_store::{Principal, Role, SecretStore};
+pub use secret_store::{Principal, SecretStore};
 pub use service_manager::ServiceManager;
 pub use session_store::{SessionId, SessionPolicy, SessionStore};
 pub use subscription_converter::{ConvertRequest, SubscriptionConverter};

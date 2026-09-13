@@ -611,12 +611,14 @@ pub struct CloseAllInput {
 }
 
 /// Who is signed in.
+///
+/// No `role`: this interface has no privilege levels, so there is nothing to
+/// report beyond the identity. A client that once branched on the field now has one
+/// behaviour, which is the behaviour `admin` used to select.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionDto {
     /// The principal identifier.
     pub principal: String,
-    /// What it may do: `admin` or `read-only`.
-    pub role: String,
 }
 
 /// A sign-in request.

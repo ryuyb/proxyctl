@@ -54,8 +54,10 @@ pub async fn logs(
     caller: Caller,
     axum::extract::Query(query): axum::extract::Query<LogQuery>,
 ) -> Result<Response, HttpError> {
-    // Reading logs requires no more privilege than reading status, so there is no
-    // `require_write` here: a read-only caller may watch.
+    // The caller is extracted so the request is authenticated; nothing further is
+    // gated here. Log lines carry network topology, so this was once a privilege
+    // question — but any caller that can reach the agent can restart the kernel,
+    // which is a larger grant than reading its log.
     let _ = &caller;
 
     let level = match query.level.as_deref() {

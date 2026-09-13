@@ -5,14 +5,21 @@
 //!
 //! # The unix socket
 //!
-//! The kernel-facing security model already treats the socket's file permissions
-//! as the whole boundary (`0660`, inside a `0750` directory). The peer credential
-//! is a *second* check, and it is off by default — deliberately, because LXC uid
-//! mapping can make a correct peer look wrong, and a check that locks an operator
-//! out of their own agent is worse than the risk it addresses.
+//! The agent socket is mode `0666`, so *any* local user may connect to it. That is
+//! a deliberate choice rather than an oversight: the socket does not authenticate
+//! by reaching it, and the interface is meant to be usable without adding each
+//! operator to a dedicated group. A caller that connects is therefore trusted as
+//! an operator, and the machine's own user separation is what stands between two
+//! local users — not this file.
 //!
-//! So the two are independent: file permissions always apply, and the credential
-//! check applies only when a deployment names the uid or gid it expects.
+//! This is *not* the model for the kernel's socket. Mihomo does not verify its
+//! `secret` on a unix socket, so there the file permissions are the entire
+//! boundary and they stay tight (`0660` inside `0750`).
+//!
+//! The peer credential on *this* socket is a second, optional check. It is off by
+//! default, and when off a read failure is not a reason to refuse, because the
+//! credential is not what is being relied on. When a deployment does configure a
+//! uid or gid, the credential check applies *in addition* to the mode being open.
 //!
 //! # Why a read failure is a refusal
 //!
@@ -22,7 +29,6 @@
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use proxy_application::ports::secret_store::Role;
 use proxy_application::ports::session_store::SessionId;
 
 use super::state::{AppState, AuthPolicy, Caller};
@@ -123,6 +129,13 @@ pub enum AuthError {
         /// The gid that connected.
         gid: u32,
     },
+    /// The request used a method this endpoint does not accept.
+    ///
+    /// Distinct from [`Self::NotPermitted`], which is about *who* connected. This
+    /// one is about *what* was asked: the `/clash-api` relay accepts only
+    /// read-only methods, whatever the caller's identity. Conflating the two made
+    /// a 403 report a uid and gid that had no bearing on the refusal.
+    MethodNotAllowed,
     /// A bearer token was required and none was presented.
     MissingToken,
     /// A bearer token was presented but is not recognised.
@@ -148,6 +161,9 @@ impl AuthError {
         match self {
             Self::NoCredential => "no peer credential was established for this connection",
             Self::NotPermitted { .. } => "the connecting user is not permitted",
+            Self::MethodNotAllowed => {
+                "this endpoint accepts read-only methods only; a state-changing method is refused"
+            }
             Self::MissingToken => "a bearer token is required",
             Self::InvalidToken => "the bearer token is not recognised",
             Self::VerificationFailed(_) => "the credential could not be verified",
@@ -224,10 +240,7 @@ pub async fn verify_bearer(state: &AppState, presented: &str) -> Result<Caller, 
         .map_err(|e| AuthError::VerificationFailed(e.to_string()))?;
 
     let principal = principal.ok_or(AuthError::InvalidToken)?;
-    Ok(Caller {
-        id: principal.id,
-        role: principal.role,
-    })
+    Ok(Caller { id: principal.id })
 }
 
 /// The authenticated caller for a request.
@@ -352,24 +365,7 @@ pub async fn resolve_session(state: &AppState, id: &SessionId) -> Result<Caller,
         .map_err(|e| AuthError::VerificationFailed(e.to_string()))?;
 
     let principal = principal.ok_or(AuthError::InvalidSession)?;
-    Ok(Caller {
-        id: principal.id,
-        role: principal.role,
-    })
-}
-
-/// Whether a caller may perform a state-changing operation.
-///
-/// # Errors
-///
-/// Returns [`AuthError::NotPermitted`] for a read-only caller, so a write endpoint
-/// refuses it explicitly rather than appearing to succeed.
-pub fn require_write(caller: &Caller) -> Result<(), AuthError> {
-    if caller.role == Role::Admin {
-        return Ok(());
-    }
-    // The uid and gid are not known here; the reason is what matters.
-    Err(AuthError::NotPermitted { uid: 0, gid: 0 })
+    Ok(Caller { id: principal.id })
 }
 
 #[cfg(test)]
@@ -438,21 +434,6 @@ mod tests {
             bearer_token(Some("Basic abc")),
             Err(AuthError::MissingToken)
         );
-    }
-
-    #[test]
-    fn a_read_only_caller_may_not_write() {
-        let viewer = Caller {
-            id: "v".to_owned(),
-            role: Role::ReadOnly,
-        };
-        assert!(require_write(&viewer).is_err());
-
-        let admin = Caller {
-            id: "a".to_owned(),
-            role: Role::Admin,
-        };
-        assert!(require_write(&admin).is_ok());
     }
 
     /// The reason strings are part of the response, so they must not carry

@@ -7,7 +7,6 @@ use proxy_application::commands::rollback_config::{RollbackConfig, RollbackConfi
 use proxy_application::queries::ListConfigs;
 
 use crate::dto::{ConfigVersionDto, IdDto, ListQuery, ValidateInput, ValidationDto};
-use crate::http::auth::require_write;
 use crate::http::error::HttpError;
 use crate::http::state::{AppState, Caller};
 
@@ -48,7 +47,8 @@ pub async fn activate(
     Path(id): Path<String>,
     body: Option<Json<ActivateBody>>,
 ) -> Result<Json<IdDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
 
     let version_id = proxy_domain::shared::id::ConfigVersionId::parse(id)
         .map_err(|e| HttpError::bad_request(e.to_string()))?;
@@ -107,7 +107,8 @@ pub async fn rollback(
     caller: Caller,
     Path(id): Path<String>,
 ) -> Result<Json<IdDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let target = proxy_domain::shared::id::ConfigVersionId::parse(id)
         .map_err(|e| HttpError::bad_request(e.to_string()))?;
     let input = RollbackConfigInput {

@@ -29,11 +29,6 @@ export const en = {
     zh: '中文',
   },
 
-  roles: {
-    admin: 'Administrator',
-    'read-only': 'Read-only',
-  },
-
   signIn: {
     title: 'Sign in',
     subtitle: 'Enter an API token issued by the agent.',
@@ -220,7 +215,6 @@ export const en = {
     activeCount: '{{count}} active',
     // Stated for a read-only session, so an empty column is not read as "the
     // agent found nothing".
-    processHidden: 'Process details are shown to administrators only.',
     closed: 'Closed {{count}} connection(s)',
     searchPlaceholder: 'Filter by host, process, or rule…',
   },
@@ -235,7 +229,6 @@ export const en = {
     clear: 'Clear',
     filterPlaceholder: 'Filter lines…',
     waiting: 'Waiting for the kernel to say something…',
-    hiddenFromReadOnly: 'Kernel logs are not sent to a read-only session.',
     lines: '{{count}} lines',
     disconnected: 'The log stream closed. Reconnecting…',
   },

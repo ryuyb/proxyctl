@@ -161,7 +161,9 @@ pub async fn run(cli: Cli) -> Exit {
                 crate::endpoint::TOKEN_ENV
             ),
             403 => eprintln!(
-                "proxyctl: the token is valid but its role does not permit this. Only an `admin`                  token may change state; a `read-only` one may read."
+                "proxyctl: the request was refused as not permitted. Every issued token carries \
+                 the same authority, so this is usually a method the endpoint does not accept — \
+                 a write sent to a read-only path, or a write to /clash-api"
             ),
             _ => {}
         }

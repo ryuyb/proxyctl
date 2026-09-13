@@ -44,11 +44,6 @@ export const zh: Translation = {
     zh: '中文',
   },
 
-  roles: {
-    admin: '管理员',
-    'read-only': '只读',
-  },
-
   signIn: {
     title: '登录',
     subtitle: '请输入代理签发的 API 令牌。',
@@ -224,7 +219,6 @@ export const zh: Translation = {
     totalUpload: '总上传',
     totalDownload: '总下载',
     activeCount: '{{count}} 条活动连接',
-    processHidden: '进程信息仅对管理员显示。',
     closed: '已关闭 {{count}} 条连接',
     searchPlaceholder: '按主机、进程或规则筛选…',
   },
@@ -239,7 +233,6 @@ export const zh: Translation = {
     clear: '清空',
     filterPlaceholder: '筛选日志行…',
     waiting: '等待内核输出…',
-    hiddenFromReadOnly: '内核日志不会发送给只读会话。',
     lines: '{{count}} 行',
     disconnected: '日志流已断开，正在重连…',
   },

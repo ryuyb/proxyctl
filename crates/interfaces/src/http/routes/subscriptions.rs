@@ -12,7 +12,6 @@ use proxy_domain::subscription::{
 };
 
 use crate::dto::{IdDto, ListQuery, SubscriptionDto, SubscriptionInput};
-use crate::http::auth::require_write;
 use crate::http::error::HttpError;
 use crate::http::state::{AppState, Caller};
 
@@ -62,7 +61,8 @@ pub async fn create(
     caller: Caller,
     Json(input): Json<SubscriptionInput>,
 ) -> Result<Json<IdDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let id = SubscriptionId::parse(input.name.trim())
         .map_err(|e| HttpError::bad_request(e.to_string()))?;
     let subscription = build_subscription(
@@ -89,7 +89,8 @@ pub async fn update(
     Path(id): Path<String>,
     Json(input): Json<SubscriptionInput>,
 ) -> Result<Json<IdDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let id = SubscriptionId::parse(id).map_err(|e| HttpError::bad_request(e.to_string()))?;
     let subscription = build_subscription(
         id.clone(),
@@ -114,7 +115,8 @@ pub async fn remove(
     caller: Caller,
     Path(id): Path<String>,
 ) -> Result<Json<IdDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let id = SubscriptionId::parse(id).map_err(|e| HttpError::bad_request(e.to_string()))?;
     SubscriptionCrud::delete(&state.ctx, &id).await?;
     Ok(Json(IdDto {
@@ -137,7 +139,8 @@ pub async fn update_now(
     caller: Caller,
     Path(id): Path<String>,
 ) -> Result<Json<SubscriptionDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
     let id = SubscriptionId::parse(id).map_err(|e| HttpError::bad_request(e.to_string()))?;
     let input = UpdateSubscriptionInput {
         id: id.clone(),

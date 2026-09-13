@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use proxy_application::AppContext;
 use proxy_application::ports::clash_proxy::UpstreamTarget;
-use proxy_application::ports::secret_store::Role;
 
 /// What access-control configuration the listener uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,12 +37,14 @@ impl AuthPolicy {
 }
 
 /// Who a request is, once authenticated.
+///
+/// Identity only — there is no role. Every authenticated caller may do everything
+/// the agent offers; see [`proxy_application::ports::secret_store::Principal`] for
+/// why the role model was removed rather than merely defaulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caller {
     /// A stable identifier for audit records.
     pub id: String,
-    /// What the caller may do.
-    pub role: Role,
 }
 
 impl Caller {
@@ -52,9 +53,6 @@ impl Caller {
     pub fn local(uid: u32, gid: u32) -> Self {
         Self {
             id: format!("local:uid({uid}),gid({gid})"),
-            // A local socket connection is already constrained by the socket's
-            // permissions, which the deployment sets to the agent's own group.
-            role: Role::Admin,
         }
     }
 
@@ -273,13 +271,13 @@ mod tests {
         assert!(policy.checks_peer_credential());
     }
 
-    /// A local caller is an operator: reaching the socket already required the
-    /// socket's permissions.
+    /// A local caller is identified by its credential. There is no privilege level
+    /// to assert: reaching the socket is what makes a caller an operator.
     #[test]
-    fn a_local_caller_is_an_admin() {
+    fn a_local_caller_is_identified_by_its_credential() {
         let caller = Caller::local(1000, 1000);
         assert!(caller.id.contains("1000"));
-        assert_eq!(caller.role, Role::Admin);
-        assert!(caller.role == Role::Admin);
+        assert_eq!(caller, Caller::local(1000, 1000));
+        assert_ne!(caller, Caller::local(1001, 1000));
     }
 }

@@ -38,7 +38,6 @@ import { Input } from '@/components/ui/input'
 import { del, get } from '@/lib/api'
 import { bytes } from '@/lib/format'
 import { keys, paths } from '@/lib/query'
-import { useIsAdmin } from '@/lib/session'
 import type { CloseResult, Connection, Connections } from '@/lib/types'
 
 /** How often the list is re-read while the page is open, in milliseconds. */
@@ -49,7 +48,6 @@ const NO_CONNECTIONS: Connection[] = []
 
 export function ConnectionsPage() {
   const { t } = useTranslation()
-  const isAdmin = useIsAdmin()
   const client = useQueryClient()
   const [filter, setFilter] = useState('')
   const [closing, setClosing] = useState<Connection | null>(null)
@@ -114,18 +112,16 @@ export function ConnectionsPage() {
               <RefreshCw className={list.isFetching ? 'size-3.5 animate-spin' : 'size-3.5'} />
               {t('common.refresh')}
             </Button>
-            {isAdmin && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-destructive"
-                onClick={() => setClosingAll(true)}
-                disabled={!connections.length}
-              >
-                <XCircle className="size-3.5" />
-                {t('connections.closeAll')}
-              </Button>
-            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-destructive"
+              onClick={() => setClosingAll(true)}
+              disabled={!connections.length}
+            >
+              <XCircle className="size-3.5" />
+              {t('connections.closeAll')}
+            </Button>
           </>
         }
       />
@@ -156,11 +152,9 @@ export function ConnectionsPage() {
                         {t('connections.destination')}
                       </th>
                       <th className="px-4 py-2 text-left font-normal">{t('connections.rule')}</th>
-                      {isAdmin && (
-                        <th className="px-4 py-2 text-left font-normal">
-                          {t('connections.process')}
-                        </th>
-                      )}
+                      <th className="px-4 py-2 text-left font-normal">
+                        {t('connections.process')}
+                      </th>
                       <th className="px-4 py-2 text-right font-normal">
                         {t('connections.upload')}
                       </th>
@@ -198,18 +192,16 @@ export function ConnectionsPage() {
                             </div>
                           )}
                         </td>
-                        {isAdmin && (
-                          <td className="px-4 py-2">
-                            <div className="max-w-48 truncate font-mono text-xs">
-                              {connection.process ?? t('common.none')}
+                        <td className="px-4 py-2">
+                          <div className="max-w-48 truncate font-mono text-xs">
+                            {connection.process ?? t('common.none')}
+                          </div>
+                          {connection.uid !== null && (
+                            <div className="text-[11px] text-muted-foreground">
+                              {t('connections.uid')} {connection.uid}
                             </div>
-                            {connection.uid !== null && (
-                              <div className="text-[11px] text-muted-foreground">
-                                {t('connections.uid')} {connection.uid}
-                              </div>
-                            )}
-                          </td>
-                        )}
+                          )}
+                        </td>
                         <td className="px-4 py-2 text-right font-mono text-xs">
                           {bytes(connection.upload)}
                         </td>
@@ -217,17 +209,15 @@ export function ConnectionsPage() {
                           {bytes(connection.download)}
                         </td>
                         <td className="px-4 py-2 text-right">
-                          {isAdmin && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="text-destructive"
-                              onClick={() => setClosing(connection)}
-                              aria-label={t('connections.close')}
-                            >
-                              <X className="size-3.5" />
-                            </Button>
-                          )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-destructive"
+                            onClick={() => setClosing(connection)}
+                            aria-label={t('connections.close')}
+                          >
+                            <X className="size-3.5" />
+                          </Button>
                         </td>
                       </tr>
                     ))}
@@ -236,9 +226,6 @@ export function ConnectionsPage() {
               </div>
             )}
 
-            {!isAdmin && (
-              <p className="text-xs text-muted-foreground">{t('connections.processHidden')}</p>
-            )}
           </>
         )}
 

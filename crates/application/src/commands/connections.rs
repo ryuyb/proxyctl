@@ -24,18 +24,17 @@ use proxy_domain::shared::time::Timestamp;
 use crate::context::AppContext;
 use crate::error::ApplicationError;
 use crate::ports::mihomo_connection_ops::CloseOutcome;
-use crate::ports::secret_store::Role;
 
 /// Requests a snapshot of the kernel's connections.
 pub struct ListConnections;
 
 impl ListConnections {
-    /// Lists connections, with process identity removed for non-administrators.
+    /// Lists connections.
     ///
-    /// The redaction happens here rather than in the interface layer because it is
-    /// an authorization rule, and authorization belongs to the layer that owns the
-    /// use case. An interface that forgot to call it would leak; this way the only
-    /// way to obtain a list is through the function that applies the rule.
+    /// Process identity is included: this interface no longer models a caller with
+    /// reduced privilege, so there is no role for which the identifying fields
+    /// would be withheld. Returning them unconditionally also means the answer does
+    /// not depend on which transport the caller used.
     ///
     /// # Errors
     ///
@@ -43,10 +42,8 @@ impl ListConnections {
     /// response is unusable.
     pub async fn execute(
         ctx: &AppContext,
-        role: Role,
     ) -> Result<crate::ports::mihomo_connection_ops::ConnectionList, ApplicationError> {
-        let list = ctx.connections.connections().await?;
-        Ok(list.redact_for(role))
+        Ok(ctx.connections.connections().await?)
     }
 }
 

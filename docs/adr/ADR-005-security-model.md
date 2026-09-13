@@ -2,7 +2,7 @@
 
 | 字段 | 值 |
 |---|---|
-| Status | Accepted（Phase 0 定稿） |
+| Status | Accepted（Phase 0 定稿）；**D3 的本地通道于 2026-09-20 修订，见 D3b** |
 | Date | 2026-09-12 |
 | Related | ADR-001、ADR-003、ADR-004、ADR-006、`docs/research/12-security.md`、`09-linux-runtime.md`、`10-pve-lxc.md`、`13-licenses.md` |
 
@@ -85,29 +85,92 @@ external-controller-cors:
 
 | 通道 | MVP 方案 | 依据 |
 |---|---|---|
-| 本地 CLI/TUI | Unix socket `/run/proxy-agent/agent.sock`，`0660 root:proxyctl`，**并用 `SO_PEERCRED` 校验 uid/gid** | R12 §1（推荐）、R09 C8 |
-| Web（远程） | **Bearer token**（SHA-256 + 逐行 salt，**已实现**）+ 严格 CORS 白名单；`ADMIN`/`READ_ONLY` 角色 | R12 §1、ADR-010 D9 |
+| 本地 CLI/TUI | Unix socket `/run/proxy-agent/agent.sock`，**`0666`，不把文件权限当边界**（见 D3b） | R12 §1（推荐）、R09 C8；**已修订** |
+| Web（远程） | **Bearer token**（SHA-256 + 逐行 salt，**已实现**）+ 严格 CORS 白名单；**不区分角色**（见 D3c） | R12 §1、ADR-010 D9/D12 |
 | 会话 cookie + CSRF、mTLS | 列入 Phase 2（不是 MVP） | R12 §1 |
 | 启动期硬校验 | **监听 TCP ⇒ 必须已签发 token，否则拒绝启动**（loopback **不豁免**；理由见 ADR-010 D9） | R12 §1、REQ-SEC-004 |
 
+### D3b. 修订：agent socket 不再依赖文件权限（2026-09-20）
+
+**背景。** D3 原本让 `agent.sock` 走 `0660 root:proxyctl` + `SO_PEERCRED`，也就是
+「谁能打开 socket，谁就是操作员」。实际使用时这条链路带来了与收益不成比例的摩擦：
+
+* 每个要用 CLI 的本机用户都必须先加入 `proxyctl` 组并重新登录；
+* `sudo -u proxy-agent proxyctl ...` 成为文档里的标准写法，而它对用户来说既难记
+  又难解释（为什么管一个自己的代理还要换身份？）；
+* 忘记这一步的症状是「agent 明明在跑，`proxyctl status` 却说连不上」——一个看起来
+  不像权限问题的权限问题。
+
+**决策。** agent socket 改为 `0666`，运行目录改为 `0751`，**agent 自己做调用方认证**
+（`AuthPolicy`；TCP 上强制 bearer token，本地 socket 上默认为「能连上即操作员」）。
+**内核 socket 保持 `0660`** —— Mihomo 在 unix socket 上不校验 `secret`，那里文件权限
+就是全部边界，这一点没有改变。
+
+**为什么这不是一次无条件放宽。**
+
+| | agent socket | kernel socket（mihomo.sock） |
+|---|---|---|
+| 自身是否认证 | **是**（`AuthPolicy`） | **否**（完全不校验 secret） |
+| 因此边界是 | agent 的认证逻辑 | **文件权限本身** |
+| 权限 | `0666` | `0660`，目录拒绝他人写入 |
+
+两者恰好相反，因此不能套用同一条规则——这正是修订后仍需保持区分的理由。
+
+**明确接受的代价。** 在多用户主机上，**本机任何用户都能通过该 socket 管理内核**。
+这是一个明确的取舍而非疏漏：目标部署（单用户服务器、PVE LXC）里没有需要区分的本地
+用户。需要收紧的部署有两条现成路径：
+
+```toml
+[agent]
+# socket = "/run/proxy-agent/agent.sock"   # 或直接改窄文件权限
+socket_allowed_uid = 1000                  # 或 socket_allowed_gid，或两者
+```
+
+**目录为什么是 0751 而不是 0750。** 运行目录同时容纳两个 socket，而两者要求相反：
+`agent.sock` 需要被本机用户**穿越**（否则客户端在能出示任何东西之前就被挡住，等于
+把刚去掉的组机制又装回来），`mihomo.sock` 需要他人**不可写**（否则本地用户可以
+unlink 并替换内核的 socket）。`0751` 同时满足两者：可穿越、不可写。
+
+### D3c. 修订：移除角色模型（2026-09-20）
+
+**决策。** Agent 不再区分「管理员」与「只读」。认证是唯一的授权维度。
+
+这与 D3b 是同一个判断的两半：既然本地通道改为「能连上即操作员」，那么角色就只在 TCP 上
+才有意义，而 TCP 的 token 本来就是操作员自己签发给自己或自己的自动化流程的。
+一个在其中一条传输上无法执行的权限模型，加上一个没有任何已发布客户端使用过的较低级别，
+只会让读者以为存在一道并不存在的边界。
+
+**影响面**（完整清单见 ADR-010 D12）：`Role` 类型、`api_principals.role` 与 `sessions.role`
+两列（schema v5 显式删列）、`require_write` 的 14 处调用、连接列表的脱敏、
+事件流的日志过滤、Web 会话响应里的角色字段、前端的 `useIsAdmin` 与两页门控。
+
+**保留的是方法门，不是身份门**：`/clash-api` 仍然只放行 `GET`/`HEAD`/`OPTIONS`。
+它防的是「页面误触发写操作」（如 `PUT /configs` 替换内核运行配置），
+与调用方是谁无关，因此不随角色一起删除。
+
+**仍然敏感的字段照旧记录**：连接列表的进程身份与内核日志的拓扑信息，
+准入控制点从「角色」变为「能否连上 agent」。
+
 ### D4. 权限模型（最小权限表）
 
-| 操作 | 本地 root | `proxy-agent` 用户 | `proxyctl` 组成员 | 远程 Web(ADMIN) | 远程 Web(READ_ONLY) |
-|---|---|---|---|---|---|
-| 查看状态/日志/Doctor | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 启停/重启/reload Mihomo | ✓ | ✓（自身子进程） | ✓（经 Agent） | ✓ | — |
-| 写/激活/回滚配置 | ✓ | ✓ | ✓ | ✓ | — |
-| 更新内核二进制 | ✓ | **需要特权路径**（见 D5） | ✓（经 Agent） | ✓ | — |
-| 查看连接列表（含 `uid`/`process`/`processPath`） | ✓ | ✓ | ✓ | ✓ | **—**（见下） |
-| 查看连接列表（脱敏） | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 关闭连接 | ✓ | ✓ | ✓ | ✓ | — |
-| 应用防火墙规则 | ✓ | 需 `CAP_NET_ADMIN`（MVP 不做 apply） | — | — | — |
-| 修改用户/组/unit | ✓ | — | — | — | — |
+> **2026-09-20 修订**：角色的两列已删除。任何**已通过认证**的调用方（能连上 agent，
+> 或持有有效 token）可以做 Agent 提供的任何事。理由见 D3c 与 ADR-010 D12。
 
-- **连接列表的行是新权限面（2026-09-12）**：`/connections` 的 `metadata` 含 `uid`、`process`、
-`processPath`，三者合起来回答「本机哪个程序访问了什么」——比状态查询敏感得多，故**只对 ADMIN 返回**。
-脱敏是**不可配置**的角色规则（ADR-003 D8）：可配置化会多一个误配的入口，而默认关闭时运维会困惑
-「为什么字段是空的」。关闭连接记审计（`connection.close`），因为中断他人传输是可追溯的运维行为。
+| 操作 | 本地 root | `proxy-agent` 用户 | 本机任意用户（经 socket） | 远程 Web（持 token） |
+|---|---|---|---|---|
+| 查看状态/日志/Doctor | ✓ | ✓ | ✓ | ✓ |
+| 启停/重启/reload Mihomo | ✓ | ✓（自身子进程） | ✓（经 Agent） | ✓ |
+| 写/激活/回滚配置 | ✓ | ✓ | ✓ | ✓ |
+| 更新内核二进制 | ✓ | **需要特权路径**（见 D5） | ✓（经 Agent） | ✓ |
+| 查看连接列表（含 `uid`/`process`/`processPath`） | ✓ | ✓ | ✓ | ✓ |
+| 关闭连接 | ✓ | ✓ | ✓ | ✓ |
+| 应用防火墙规则 | ✓ | 需 `CAP_NET_ADMIN`（MVP 不做 apply） | — | — |
+| 修改用户/组/unit | ✓ | — | — | — |
+
+- **连接列表的字段现在对所有人可见**：`/connections` 的 `metadata` 含 `uid`、`process`、
+`processPath`，三者合起来回答「本机哪个程序访问了什么」。原本**只对 ADMIN 返回**；
+角色删除后不再有任何调用方需要被遮住，而准入控制上移到「能否连上 agent」。
+关闭连接记审计（`connection.close`），因为中断他人传输是可追溯的运维行为。
 
 **不需要 root 的能力**：配置版本化、订阅管理、状态查询、Doctor（只读探测）。
 - **需要 `CAP_NET_ADMIN`**：TUN 创建、nftables/策略路由写入、`ip` 操作（R10 §1）。

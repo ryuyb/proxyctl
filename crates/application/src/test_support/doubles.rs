@@ -40,7 +40,7 @@ use crate::ports::mihomo_observer::{
 use crate::ports::process_manager::{
     AllowedSignal, ExitStatus, ProcessHandle, ProcessManager, ProcessStatus, StartOptions,
 };
-use crate::ports::secret_store::{Principal, PrincipalSummary, Role, SecretStore};
+use crate::ports::secret_store::{Principal, PrincipalSummary, SecretStore};
 use crate::ports::service_manager::ServiceManager;
 use crate::ports::session_store::{SessionId, SessionStore};
 use crate::ports::subscription_converter::{ConvertRequest, SubscriptionConverter};
@@ -179,19 +179,18 @@ impl SecretStore for FakeSecretStore {
     }
 
     async fn verify_api_token(&self, presented: &str) -> Result<Option<Principal>, PortError> {
-        // Two fixed tokens, so a test can exercise both roles. Before the TCP
-        // listener existed every caller was an administrator by construction, and a
-        // double could only express that one case; the authorization rules in the
-        // connections and events endpoints are only reachable now.
+        // Two fixed tokens, so a test can name either principal. There is no role
+        // to distinguish them by any more; the second token remains useful for
+        // asserting that two identities are not confused for one another.
         let matched = match presented {
-            "test-token" => Some(("test".to_owned(), Role::Admin)),
-            "read-only-token" => Some(("viewer".to_owned(), Role::ReadOnly)),
+            "test-token" => Some("test".to_owned()),
+            "read-only-token" => Some("viewer".to_owned()),
             _ => None,
         };
-        Ok(matched.map(|(id, role)| Principal { id, role }))
+        Ok(matched.map(|id| Principal { id }))
     }
 
-    async fn issue_api_token(&self, principal: &str, _role: Role) -> Result<String, PortError> {
+    async fn issue_api_token(&self, principal: &str) -> Result<String, PortError> {
         // Deterministic rather than random: a double's value is used in
         // assertions, and a value that changed per call could not be one.
         Ok(format!("issued-token-for-{principal}"))
@@ -1250,7 +1249,7 @@ impl InstanceRepository for FakeInstanceRepository {
 /// one that never stored anything.
 #[derive(Debug, Default)]
 pub struct FakeSessionStore {
-    sessions: Mutex<HashMap<String, (String, Role)>>,
+    sessions: Mutex<HashMap<String, String>>,
     next: Mutex<u64>,
 }
 
@@ -1270,7 +1269,7 @@ impl FakeSessionStore {
 
 #[async_trait]
 impl SessionStore for FakeSessionStore {
-    async fn create(&self, principal: &str, role: Role, _now: i64) -> Result<SessionId, PortError> {
+    async fn create(&self, principal: &str, _now: i64) -> Result<SessionId, PortError> {
         if principal.trim().is_empty() {
             return Err(PortError::Storage("a session needs a principal".to_owned()));
         }
@@ -1283,7 +1282,7 @@ impl SessionStore for FakeSessionStore {
         self.sessions
             .lock()
             .map_err(|_| PortError::Storage("lock".to_owned()))?
-            .insert(id.clone(), (principal.to_owned(), role));
+            .insert(id.clone(), principal.to_owned());
         Ok(SessionId::new(id))
     }
 
@@ -1296,9 +1295,8 @@ impl SessionStore for FakeSessionStore {
             .lock()
             .map_err(|_| PortError::Storage("lock".to_owned()))?
             .get(id.as_str())
-            .map(|(principal, role)| Principal {
+            .map(|principal| Principal {
                 id: principal.clone(),
-                role: *role,
             }))
     }
 
@@ -1317,7 +1315,7 @@ impl SessionStore for FakeSessionStore {
             .lock()
             .map_err(|_| PortError::Storage("lock".to_owned()))?;
         let before = sessions.len();
-        sessions.retain(|_, (held, _)| held != principal);
+        sessions.retain(|_, held| held != principal);
         Ok(before - sessions.len())
     }
 

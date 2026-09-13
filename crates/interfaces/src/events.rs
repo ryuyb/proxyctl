@@ -1,4 +1,4 @@
-//! The event stream's shape, and what each role may see.
+//! The event stream's shape.
 //!
 //! # A second definition of the events, on purpose
 //!
@@ -9,19 +9,16 @@
 //! one would break subscribers without anyone deciding to. The mapping is explicit
 //! so that a change to either side is a change to this file.
 //!
-//! # Which events a role may see
+//! # Every subscriber sees every event
 //!
 //! Kernel log lines carry network topology — hosts, DNS answers, matched rules —
-//! even after credentials are stripped. They are not a read-only caller's to see.
-//! Everything else is a *state change*, and a read-only client needs those to know
-//! when to re-read, so withholding them would force polling for no gain.
-//!
-//! The filtering is applied at serialisation, in [`Event::for_role`], rather than
-//! by the transport: a stream that emitted the event and relied on the writer to
-//! skip it would put the rule in two places.
+//! even after credentials are stripped, so access to the stream is worth thinking
+//! about. It is not gated here: reaching the agent at all already means being able
+//! to manage the kernel, which is a strictly larger grant than reading its log.
+//! Withholding log lines from a subscriber that could otherwise restart the kernel
+//! would be a restriction in appearance only.
 
 use proxy_application::ports::event_publisher::DomainEvent;
-use proxy_application::ports::secret_store::Role;
 use proxy_application::ports::types::LogLevel;
 
 /// A named event, as it appears on the wire.
@@ -102,19 +99,6 @@ impl Event {
             at,
             data,
         })
-    }
-
-    /// Whether a caller with `role` may receive this event.
-    ///
-    /// Only kernel logs are withheld, and the reason is in this module's header:
-    /// they describe the network, and everything else describes the agent's own
-    /// state changes, which a read-only client must see to stay current.
-    #[must_use]
-    pub fn is_visible_to(&self, role: Role) -> bool {
-        if role == Role::Admin {
-            return true;
-        }
-        !self.is_kernel_log()
     }
 
     /// Whether this is a kernel log line.
@@ -278,9 +262,11 @@ mod tests {
         );
     }
 
-    /// The rule the module header describes, asserted for both roles.
+    /// A kernel log is recognised as one. It is no longer withheld from anyone —
+    /// see the module header — so what remains to assert is the classification the
+    /// log-level filter depends on.
     #[test]
-    fn a_kernel_log_is_withheld_from_a_read_only_caller() {
+    fn a_kernel_log_is_recognised() {
         let log = Event::from_domain(
             &DomainEvent::MihomoLog {
                 level: LogLevel::Info,
@@ -291,41 +277,21 @@ mod tests {
         )
         .expect("mapped");
         assert!(log.is_kernel_log());
-        assert!(!log.is_visible_to(Role::ReadOnly), "a log leaked");
-        assert!(log.is_visible_to(Role::Admin));
     }
 
-    /// A state change must reach a read-only caller: withholding it would force
-    /// polling for no benefit.
-    #[test]
-    fn a_state_change_reaches_every_role() {
-        let event = Event::from_domain(&activated(), 1, 0).expect("mapped");
-        assert!(event.is_visible_to(Role::ReadOnly));
-        assert!(event.is_visible_to(Role::Admin));
-    }
-
-    /// An unknown event must be refused rather than given a made-up shape.
     #[test]
     fn heartbeat_is_recognised_and_carries_no_payload() {
         let beat = Event::heartbeat(7, 100);
         assert!(beat.is_heartbeat());
         assert_eq!(beat.seq, 7);
         assert_eq!(beat.data, serde_json::json!({}));
-        // A heartbeat is not a log, so it reaches everyone: it carries nothing but
-        // the fact that the connection is alive.
-        assert!(beat.is_visible_to(Role::ReadOnly));
     }
 
-    /// A lag notice must reach every role: it reports a property of the stream,
-    /// not of the kernel, so withholding it would leave a read-only client unable
-    /// to tell a silent system from a broken one.
     #[test]
-    fn a_lag_notice_reaches_every_role() {
+    fn a_lag_notice_reports_what_was_missed() {
         let notice = Event::lagged(5, 100, 3);
         assert!(notice.is_lagged());
         assert_eq!(notice.data["missed"], 3);
-        assert!(notice.is_visible_to(Role::ReadOnly));
-        assert!(notice.is_visible_to(Role::Admin));
     }
 
     #[test]

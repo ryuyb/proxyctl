@@ -34,7 +34,7 @@ use rusqlite::OptionalExtension;
 use async_trait::async_trait;
 
 use proxy_application::ports::PortError;
-use proxy_application::ports::secret_store::{Principal, PrincipalSummary, Role, SecretStore};
+use proxy_application::ports::secret_store::{Principal, PrincipalSummary, SecretStore};
 
 use crate::storage::{SqlitePool, storage_err};
 
@@ -46,12 +46,6 @@ pub const SECRET_BYTES: usize = 32;
 
 /// The key under which the kernel controller secret is stored.
 pub const MIHOMO_SECRET_KEY: &str = "mihomo.controller.secret";
-
-/// Access level assigned to a verified API token.
-///
-/// MVP issues a single administrative token. Roles exist in the domain already,
-/// so introducing a read-only token later is a row, not a redesign.
-pub const DEFAULT_TOKEN_ROLE: Role = Role::Admin;
 
 /// Stores credentials in SQLite, generating them on first use.
 #[derive(Debug, Clone)]
@@ -95,7 +89,7 @@ impl SqliteSecretStore {
     ///
     /// Returns [`PortError::Storage`] when entropy cannot be read or the token
     /// cannot be persisted.
-    pub async fn issue_api_token(&self, principal: &str, role: Role) -> Result<String, PortError> {
+    pub async fn issue_api_token(&self, principal: &str) -> Result<String, PortError> {
         if principal.trim().is_empty() {
             return Err(storage_err("a principal identifier must not be empty"));
         }
@@ -104,20 +98,18 @@ impl SqliteSecretStore {
         let hash = hash_token(&salt, &token);
 
         let id = principal.to_owned();
-        let role = role_label(role);
         let created = wall_clock_seconds();
 
         self.pool
             .with_connection(move |conn| {
                 conn.execute(
-                    "INSERT INTO api_principals (id, role, token_hash, token_salt, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    "INSERT INTO api_principals (id, token_hash, token_salt, created_at)
+                     VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(id) DO UPDATE SET
-                        role = excluded.role,
                         token_hash = excluded.token_hash,
                         token_salt = excluded.token_salt,
                         created_at = excluded.created_at",
-                    rusqlite::params![id, role, hash, salt, created],
+                    rusqlite::params![id, hash, salt, created],
                 )
                 .map_err(|e| storage_err(format!("cannot issue an api token: {e}")))?;
                 Ok(())
@@ -139,27 +131,19 @@ impl SqliteSecretStore {
         self.pool
             .with_connection(|conn| {
                 let mut statement = conn
-                    .prepare("SELECT id, role, created_at FROM api_principals ORDER BY id")
+                    .prepare("SELECT id, created_at FROM api_principals ORDER BY id")
                     .map_err(|e| storage_err(format!("cannot prepare listing: {e}")))?;
                 let mapped = statement
                     .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                        ))
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                     })
                     .map_err(|e| storage_err(format!("cannot read principals: {e}")))?;
 
                 let mut out = Vec::new();
                 for entry in mapped {
-                    let (id, role, created_at) =
+                    let (id, created_at) =
                         entry.map_err(|e| storage_err(format!("cannot read a row: {e}")))?;
-                    out.push(PrincipalSummary {
-                        id,
-                        role: role_from_label(&role)?,
-                        created_at,
-                    });
+                    out.push(PrincipalSummary { id, created_at });
                 }
                 Ok(out)
             })
@@ -260,8 +244,8 @@ impl SecretStore for SqliteSecretStore {
         Ok(generated)
     }
 
-    async fn issue_api_token(&self, principal: &str, role: Role) -> Result<String, PortError> {
-        Self::issue_api_token(self, principal, role).await
+    async fn issue_api_token(&self, principal: &str) -> Result<String, PortError> {
+        Self::issue_api_token(self, principal).await
     }
 
     async fn list_api_tokens(&self) -> Result<Vec<PrincipalSummary>, PortError> {
@@ -281,7 +265,7 @@ impl SecretStore for SqliteSecretStore {
             .pool
             .with_connection(|conn| {
                 let mut statement = conn
-                    .prepare("SELECT id, role, token_hash, token_salt FROM api_principals")
+                    .prepare("SELECT id, token_hash, token_salt FROM api_principals")
                     .map_err(|e| storage_err(format!("cannot prepare token lookup: {e}")))?;
                 let mapped = statement
                     .query_map([], |row| {
@@ -289,7 +273,6 @@ impl SecretStore for SqliteSecretStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
                         ))
                     })
                     .map_err(|e| storage_err(format!("cannot read api tokens: {e}")))?;
@@ -310,13 +293,10 @@ impl SecretStore for SqliteSecretStore {
         // buying a cheaper scheme would mean a global salt, which would let two
         // databases be compared against each other.
         let mut matched: Option<Principal> = None;
-        for (id, role, hash, salt) in rows {
+        for (id, hash, salt) in rows {
             let candidate = hash_token(&salt, presented);
             if constant_time_eq(hash.as_bytes(), candidate.as_bytes()) && matched.is_none() {
-                matched = Some(Principal {
-                    id,
-                    role: role_from_label(&role)?,
-                });
+                matched = Some(Principal { id });
             }
         }
 
@@ -364,23 +344,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-fn role_label(role: Role) -> String {
-    match role {
-        Role::Admin => "admin".to_owned(),
-        Role::ReadOnly => "read-only".to_owned(),
-    }
-}
-
-fn role_from_label(label: &str) -> Result<Role, PortError> {
-    match label.trim() {
-        "admin" => Ok(Role::Admin),
-        "read-only" => Ok(Role::ReadOnly),
-        other => Err(storage_err(format!(
-            "stored api principal has an unknown role: {other}"
-        ))),
-    }
 }
 
 /// Generates a random secret, hex encoded.

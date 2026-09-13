@@ -465,16 +465,19 @@ impl std::fmt::Debug for LineStream {
 /// # Why the errno matters
 ///
 /// Every way of failing to open the agent socket produced the same sentence —
-/// "is the agent running?" — and that is the wrong advice for one of the most
-/// likely cases. A socket that exists but is owned by `proxy-agent:proxy-agent`
-/// with mode `0660` refuses a caller who is not in that group with `EACCES`, and
-/// the remedy is not to start the agent (it is running) but to change who is
-/// asking.
+/// "is the agent running?" — and that is the wrong advice for the most confusing
+/// case. A socket that exists but has no listener gives `ECONNREFUSED`, while a
+/// path that was never created gives `ENOENT`: the first means the agent exited,
+/// the second usually means a different socket path. Neither is fixed by the same
+/// thing, so they must not read the same.
+///
+/// `EACCES` is now the *unusual* case. The packaged socket is mode `0666`, so a
+/// permission error means the deployment narrowed it deliberately — a peer uid or
+/// gid check is configured, or the mode was changed — and the remedy is to look at
+/// that policy rather than to start anything.
 ///
 /// The distinction is available: `reqwest`'s error chains to the `io::Error`
-/// underneath, which carries the OS code. Separating the cases costs a walk down
-/// that chain and saves an operator from checking the wrong thing — especially
-/// since starting an agent that is already running appears to do nothing.
+/// underneath, which carries the OS code.
 fn describe_connect_error(error: &reqwest::Error) -> String {
     if error.is_timeout() {
         return "the request timed out".to_owned();
@@ -482,11 +485,11 @@ fn describe_connect_error(error: &reqwest::Error) -> String {
 
     if error.is_connect() {
         return match underlying_errno(error) {
-            // The socket is there and nobody may open it.
+            // Reachable but refused: the deployment narrowed the socket on purpose.
             Some(13) => "permission denied opening the agent socket. The socket is \
-                 owned by the agent's user and is not world-accessible — run the \
-                 command as that user, or add yourself to its group (see the \
-                 README, \"Why sudo -u proxy-agent\")"
+                 not open to this user, which means the deployment configured a \
+                 peer uid/gid check or narrowed its mode. Check the agent's \
+                 authentication settings"
                 .to_owned(),
             // No such file: the path is wrong, or nothing ever listened there.
             Some(2) => "the socket does not exist; is the agent running?".to_owned(),

@@ -27,11 +27,20 @@ Group=proxy-agent
 ExecStart=/usr/bin/proxyctl agent run --config /etc/proxy-agent/config.toml
 
 # systemd owns the directories so their modes are not a matter of install-time
-# luck. `RuntimeDirectory` *is* the access-control boundary for the agent socket:
-# 0750 on the directory plus 0660 on the socket is what limits who can manage the
-# kernel (ADR-005 D3).
+# luck.
+#
+# `/run/proxy-agent` is 0755 because it must be *traversable* by any local user:
+# `agent.sock` is mode 0666 and authenticates its caller itself, so a 0750
+# directory would block the client before it could present anything — the group
+# dance this design exists to avoid. The state and configuration directories stay
+# 0700: they hold the database, the kernel secret, and stored configs, and no
+# local user should read them.
+#
+# `mihomo.sock` lives in the same runtime directory and stays 0660, applied by the
+# agent rather than by the unit. Mihomo does not verify its secret on a unix
+# socket, so there the file mode is the entire boundary.
 RuntimeDirectory=proxy-agent
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0755
 StateDirectory=proxy-agent
 StateDirectoryMode=0700
 ConfigurationDirectory=proxy-agent

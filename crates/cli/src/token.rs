@@ -22,7 +22,6 @@
 //! loses it must issue a new one, which is why the output says so rather than
 //! leaving someone to discover it from an authentication failure.
 
-use proxy_application::ports::secret_store::Role;
 use proxy_bootstrap::RuntimeConfig;
 use proxy_bootstrap::tokens::SqliteSecretStore;
 
@@ -39,14 +38,9 @@ pub async fn issue(args: &TokenIssueArgs) -> Exit {
         }
     };
 
-    let role: Role = args.role.into();
-    match store.issue(&args.principal, role).await {
+    match store.issue(&args.principal).await {
         Ok(token) => {
-            // The role is echoed because it is the part a caller most easily gets
-            // wrong, and the error it causes is a refusal at request time rather
-            // than anything visible here.
             println!("principal: {}", args.principal);
-            println!("role:      {}", describe(role));
             println!("token:     {token}");
             println!();
             println!(
@@ -88,12 +82,7 @@ pub async fn list(config: &Option<std::path::PathBuf>) -> Exit {
         }
         Ok(principals) => {
             for principal in &principals {
-                println!(
-                    "{:<24} {:<10} {}",
-                    principal.id,
-                    describe(principal.role),
-                    principal.created_at
-                );
+                println!("{:<24} {}", principal.id, principal.created_at);
             }
             println!("{} principal(s)", principals.len());
             Exit::Success
@@ -165,12 +154,4 @@ async fn open(config: &Option<std::path::PathBuf>) -> Result<SqliteSecretStore, 
     proxy_bootstrap::tokens::open_store(&config)
         .await
         .map_err(|e| e.to_string())
-}
-
-/// A role's label.
-fn describe(role: Role) -> &'static str {
-    match role {
-        Role::Admin => "admin",
-        Role::ReadOnly => "read-only",
-    }
 }

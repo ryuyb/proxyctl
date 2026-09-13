@@ -22,7 +22,6 @@ use proxy_application::ports::mihomo_connection_ops::CloseOutcome;
 use proxy_domain::shared::time::Timestamp;
 
 use crate::dto::{CloseAllInput, CloseResultDto, ConnectionsDto};
-use crate::http::auth::require_write;
 use crate::http::error::HttpError;
 use crate::http::state::{AppState, Caller};
 
@@ -39,7 +38,10 @@ pub async fn list(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<ConnectionsDto>, HttpError> {
-    let list = ListConnections::execute(&state.ctx, caller.role).await?;
+    // `caller` authenticates the request but does not narrow the answer: the
+    // interface has no reduced-privilege caller, so process identity is included.
+    let _ = &caller;
+    let list = ListConnections::execute(&state.ctx).await?;
     Ok(Json(ConnectionsDto::from(list)))
 }
 
@@ -54,7 +56,8 @@ pub async fn close_one(
     caller: Caller,
     Path(id): Path<String>,
 ) -> Result<Json<CloseResultDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
 
     if id.trim().is_empty() {
         return Err(HttpError::bad_request(
@@ -84,7 +87,8 @@ pub async fn close_all(
     caller: Caller,
     body: Option<Json<CloseAllInput>>,
 ) -> Result<Json<CloseResultDto>, HttpError> {
-    require_write(&caller)?;
+    // Authenticated, not authorized: this interface has no privilege levels.
+    let _ = &caller;
 
     // Absent and `false` are treated alike: both mean "not confirmed". A missing
     // body is the most likely way to reach this by accident, so it must not be the
@@ -143,11 +147,10 @@ mod tests {
         );
     }
 
-    /// The DTO must not carry process identity for a read-only caller. This is
-    /// asserted at the DTO boundary because that is where a leak would become
-    /// visible on the wire.
+    /// Process identity reaches the wire. Asserted at the DTO boundary because that
+    /// is where either a leak or an unintended omission becomes visible.
     #[test]
-    fn a_redacted_view_produces_a_dto_without_process_identity() {
+    fn a_view_produces_a_dto_with_process_identity() {
         use proxy_application::ports::mihomo_connection_ops::ConnectionView;
         let view = ConnectionView {
             id: "c1".to_owned(),
@@ -164,12 +167,17 @@ mod tests {
             download: 0,
             inbound: None,
         };
-        let redacted = view.redact_for(proxy_application::ports::secret_store::Role::ReadOnly);
-        let dto = ConnectionDto::from(redacted);
-        assert!(dto.uid.is_none(), "{dto:?}");
-        assert!(dto.process.is_none(), "{dto:?}");
-        assert!(dto.process_path.is_none(), "{dto:?}");
-        // And the rest is still there, or the list would be useless.
+        // Process identity is carried through to the wire. It was previously
+        // cleared for a reduced-privilege caller; there is no such caller now, and
+        // this asserts the fields survive rather than being dropped in mapping.
+        let dto = ConnectionDto::from(view);
+        assert_eq!(dto.uid, Some(1000), "{dto:?}");
+        assert_eq!(dto.process.as_deref(), Some("curl"), "{dto:?}");
+        assert_eq!(
+            dto.process_path.as_deref(),
+            Some("/usr/bin/curl"),
+            "{dto:?}"
+        );
         assert_eq!(dto.id, "c1");
         assert_eq!(dto.destination, "example.com:443");
     }

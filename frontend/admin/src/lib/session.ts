@@ -1,5 +1,5 @@
 /**
- * The session: who is signed in, and what they may do.
+ * The session: who is signed in.
  *
  * # Why this holds no credential
  *
@@ -9,19 +9,18 @@
  * design exists. If this file held a token in memory or in `localStorage`, any
  * script that got onto the page could take it.
  *
- * # Why role gating is presentational only
+ * # Why there is no role
  *
- * `role` here decides which controls are drawn. It is not a security boundary and
- * must not be treated as one: a caller can edit anything in this bundle. The
- * boundary is the agent, which refuses a write from a read-only session and
- * removes process identifiers from a connection list before it serialises them.
- * Hiding a button is a kindness to the operator, not a control.
+ * Every signed-in caller may do everything this interface offers. There is no
+ * `useIsAdmin` and no control that depends on one, because a control drawn for
+ * some callers and not others would describe a boundary that does not exist: the
+ * agent applies the same rules to every request.
  */
 
 import { createContext, useContext } from 'react'
 
 import { ApiError, API_PREFIX, del, get, post } from './api'
-import type { Role, Session } from './types'
+import type { Session } from './types'
 
 /** What a component may rely on about the session. */
 export interface SessionState {
@@ -49,11 +48,6 @@ export function useSession(): SessionState {
   return value
 }
 
-/** Whether the signed-in caller may perform state-changing operations. */
-export function useIsAdmin(): boolean {
-  return useSession().session?.role === 'admin'
-}
-
 /** Reads the current session, or `null` when not signed in. */
 export async function fetchSession(): Promise<Session | null> {
   // `GET /session` answers 401 when there is no valid session. That is the
@@ -77,11 +71,3 @@ export async function signIn(token: string): Promise<Session> {
 export async function signOut(): Promise<void> {
   await del<void>(`${API_PREFIX}/session`)
 }
-
-/**
- * The role labels the agent uses.
- *
- * Reused rather than re-spelled, so a client comparing strings sees one spelling.
- * `read-only`, not `readOnly` or `readonly`.
- */
-export const ROLES: Record<Role, Role> = { admin: 'admin', 'read-only': 'read-only' }

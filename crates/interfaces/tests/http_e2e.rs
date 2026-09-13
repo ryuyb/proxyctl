@@ -203,9 +203,14 @@ async fn the_default_policy_accepts_the_same_request() {
     assert_eq!(status, 200);
 }
 
-/// The socket must be created with the documented restrictive mode.
+/// The socket must be created with the documented mode, which is *open*: the
+/// agent authenticates the caller rather than relying on file permissions, so a
+/// restrictive mode here would only lock clients out for no gain.
+///
+/// The mode is still applied explicitly rather than left to `umask`, so the
+/// result does not depend on the environment the agent was started in.
 #[tokio::test]
-async fn the_socket_is_not_world_accessible() {
+async fn the_socket_is_created_with_the_documented_mode() {
     use std::os::unix::fs::PermissionsExt;
 
     let server = Server::start(AuthPolicy::socket_default()).await;
@@ -213,7 +218,7 @@ async fn the_socket_is_not_world_accessible() {
         .expect("metadata")
         .permissions()
         .mode();
-    assert_eq!(mode & 0o007, 0, "mode {mode:o}");
+    assert_eq!(mode & 0o777, 0o666, "mode {mode:o}");
 }
 
 /// A stale socket file must be replaced rather than causing a bind failure: an

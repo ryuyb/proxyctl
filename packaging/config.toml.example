@@ -57,15 +57,16 @@
 # Which instance to compose for.
 #instance = "default"
 
-# Where management requests are accepted. The socket's file permissions are the
-# access-control boundary; there is no remote listener in this version.
+# Where management requests are accepted. The socket is mode 0666, so any local
+# user can reach it; the agent authenticates the caller itself rather than
+# treating the file permissions as the boundary. Narrow it here, or use the peer
+# check below, if this host has local users you do not trust.
 #socket = "/run/proxy-agent/agent.sock"
 
-# A peer credential the socket must present, checked on top of the file
-# permissions. Unset (0 or absent) leaves the file permissions as the only
-# boundary, which is the documented default — LXC uid mapping can make a correct
-# peer look wrong, and a check that locks an operator out of their own agent is
-# worse than the risk it addresses.
+# A peer credential the socket must present, on top of reaching the socket at all.
+# Unset (0 or absent) means any local user is an operator, which is the documented
+# default — LXC uid mapping can make a correct peer look wrong, and a check that
+# locks an operator out of their own agent is worse than the risk it addresses.
 #allowed_uid = 0
 #allowed_gid = 0
 

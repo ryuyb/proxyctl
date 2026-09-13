@@ -206,8 +206,11 @@ fn the_documents_are_present_to_check() {
 #[test]
 fn the_extractor_finds_the_commands_that_are_there() {
     // A parser that returns nothing would make every other test vacuous, so it is
-    // checked against a string whose answer is known.
-    let text = "sudo -u proxy-agent proxyctl mihomo update v1.19.30\n\
+    // checked against a string whose answer is known. The `sudo` lines are the
+    // interesting part: the extractor must find the `proxyctl` word inside them and
+    // must not mistake `sudo` or `systemctl` for a command of ours.
+    let text = "sudo systemctl start proxy-agent\n\
+                sudo -u proxy-agent proxyctl mihomo update v1.19.30\n\
                 proxyctl status\n\
                 proxyctl config validate FILE   # a comment\n";
     let found = documented_commands(text);

@@ -1,6 +1,6 @@
 //! SQLite-backed web sessions.
 //!
-//! # The identifier is hashed, and the role is stored
+//! # The identifier is hashed
 //!
 //! Same reasoning as API tokens: a copy of this table is otherwise a set of usable
 //! credentials. The hash is salted with a per-row value so two databases cannot be
@@ -8,17 +8,14 @@
 //! two different schemes for the same kind of value would be one more thing to get
 //! right for no benefit.
 //!
-//! The role is stored beside the session rather than looked up from the principal
-//! on every request. That is a deliberate staleness: revoking a token and
-//! reissuing it with a lower role does not retroactively downgrade sessions
-//! already open, which is what `revoke_principal` is for. Looking it up live would
-//! make a privilege change take effect mid-request, which is harder to reason
-//! about than an explicit revocation.
+//! Only the identifier that owns the session is stored beside it. There was once a
+//! stored role too, and it was removed with the rest of the role model: a session
+//! resolves to a principal, and a principal has no privilege level to carry.
 
 use async_trait::async_trait;
 
 use proxy_application::ports::PortError;
-use proxy_application::ports::secret_store::{Principal, Role};
+use proxy_application::ports::secret_store::Principal;
 use proxy_application::ports::session_store::{SessionId, SessionStore};
 
 use crate::storage::secrets::generate_secret;
@@ -60,7 +57,7 @@ fn hash_session(salt: &str, id: &str) -> String {
 
 #[async_trait]
 impl SessionStore for SqliteSessionStore {
-    async fn create(&self, principal: &str, role: Role, now: i64) -> Result<SessionId, PortError> {
+    async fn create(&self, principal: &str, now: i64) -> Result<SessionId, PortError> {
         if principal.trim().is_empty() {
             return Err(storage_err("a session needs a principal"));
         }
@@ -73,14 +70,13 @@ impl SessionStore for SqliteSessionStore {
         // salt, and one column means one thing to keep consistent.
         let stored = format!("{salt}:{hash}");
         let principal = principal.to_owned();
-        let role = role_label(role);
 
         self.pool
             .with_connection(move |conn| {
                 conn.execute(
-                    "INSERT INTO sessions (id_hash, principal, role, created_at, last_seen_at)
-                     VALUES (?1, ?2, ?3, ?4, ?4)",
-                    rusqlite::params![stored, principal, role, now],
+                    "INSERT INTO sessions (id_hash, principal, created_at, last_seen_at)
+                     VALUES (?1, ?2, ?3, ?3)",
+                    rusqlite::params![stored, principal, now],
                 )
                 .map_err(|e| storage_err(format!("cannot create a session: {e}")))?;
                 Ok(())
@@ -103,18 +99,15 @@ impl SessionStore for SqliteSessionStore {
             .pool
             .with_connection(|conn| {
                 let mut statement = conn
-                    .prepare(
-                        "SELECT id_hash, principal, role, created_at, last_seen_at FROM sessions",
-                    )
+                    .prepare("SELECT id_hash, principal, created_at, last_seen_at FROM sessions")
                     .map_err(|e| storage_err(format!("cannot prepare a session lookup: {e}")))?;
                 let mapped = statement
                     .query_map([], |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(2)?,
                             row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
                         ))
                     })
                     .map_err(|e| storage_err(format!("cannot read sessions: {e}")))?;
@@ -127,8 +120,8 @@ impl SessionStore for SqliteSessionStore {
             })
             .await?;
 
-        let mut matched: Option<(String, String, String)> = None;
-        for (stored, principal, role, created, seen) in rows {
+        let mut matched: Option<(String, String)> = None;
+        for (stored, principal, created, seen) in rows {
             let Some((salt, hash)) = stored.split_once(':') else {
                 // A row that cannot be parsed is corruption; skipping it is right,
                 // because the alternative is refusing every valid session too.
@@ -136,13 +129,13 @@ impl SessionStore for SqliteSessionStore {
             };
             if constant_time_eq(hash.as_bytes(), hash_session(salt, id.as_str()).as_bytes()) {
                 if matched.is_none() {
-                    matched = Some((stored, principal, role));
+                    matched = Some((stored, principal));
                 }
                 let _ = (created, seen);
             }
         }
 
-        let Some((stored, principal, role)) = matched else {
+        let Some((stored, principal)) = matched else {
             return Ok(None);
         };
 
@@ -183,10 +176,7 @@ impl SessionStore for SqliteSessionStore {
             return Ok(None);
         }
 
-        Ok(Some(Principal {
-            id: principal,
-            role: role_from_label(&role)?,
-        }))
+        Ok(Some(Principal { id: principal }))
     }
 
     async fn revoke(&self, id: &SessionId) -> Result<bool, PortError> {
@@ -252,19 +242,15 @@ impl SessionStore for SqliteSessionStore {
 
 impl SqliteSessionStore {
     /// Every stored session row.
-    async fn session_rows(&self) -> Result<Vec<(String, String, String)>, PortError> {
+    async fn session_rows(&self) -> Result<Vec<(String, String)>, PortError> {
         self.pool
             .with_connection(|conn| {
                 let mut statement = conn
-                    .prepare("SELECT id_hash, principal, role FROM sessions")
+                    .prepare("SELECT id_hash, principal FROM sessions")
                     .map_err(|e| storage_err(format!("cannot prepare a session lookup: {e}")))?;
                 let mapped = statement
                     .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })
                     .map_err(|e| storage_err(format!("cannot read sessions: {e}")))?;
 
@@ -292,21 +278,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-fn role_label(role: Role) -> String {
-    match role {
-        Role::Admin => "admin".to_owned(),
-        Role::ReadOnly => "read-only".to_owned(),
-    }
-}
-
-fn role_from_label(label: &str) -> Result<Role, PortError> {
-    match label.trim() {
-        "admin" => Ok(Role::Admin),
-        "read-only" => Ok(Role::ReadOnly),
-        other => Err(storage_err(format!("unknown role label: {other}"))),
-    }
 }
 
 #[cfg(test)]

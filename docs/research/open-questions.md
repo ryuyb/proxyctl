@@ -204,10 +204,11 @@ http://10.0.0.1/s                    -> ACCEPTED
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | **`RESOLVED`（MVP 方案）** |
+| 状态 | **`RESOLVED`（MVP 方案）；其中两处已于 2026-09-20 修订** |
 | 结论 | 本地：Unix socket + 文件权限（`0660 root:proxyctl`）+ `SO_PEERCRED` 校验 uid/gid。远程：**Bearer token（哈希存储、可轮换）** + 严格 CORS 白名单 + 角色（`ADMIN`/`READ_ONLY`）；**非 loopback 监听而无 token ⇒ 拒绝启动**。会话 cookie+CSRF 与 mTLS 列入 Phase 2。 |
 | 未验证 | `SO_PEERCRED` 在 tokio/Rust 下的具体 API 可用性需在实现时验证。 |
 | 来源 | `docs/research/12-security.md` §1、ADR-005 D3 |
+| 修订 | **本条的「本地 socket `0660`」与「`ADMIN`/`READ_ONLY` 角色」两条已作废**：agent socket 改为 `0666`、运行目录 `0751`（ADR-005 D3b），角色模型整体删除（ADR-005 D3c、ADR-010 D12）。保留的只有「远程必须有 token，且非 loopback 监听也不例外」，以及 Phase 2 的 cookie/CSRF/mTLS 判断。详见 [ADR-005](../adr/ADR-005-security-model.md) D3b/D3c 与 [ADR-010](../adr/ADR-010-cli-client-and-agent.md) D12。 |
 
 ## Q014 — PVE LXC 是否需要官方容器镜像形态？
 

@@ -41,7 +41,6 @@ import {
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { paths } from '@/lib/query'
-import { useIsAdmin } from '@/lib/session'
 import { readLines } from '@/lib/stream'
 import type { LogEntry } from '@/lib/types'
 
@@ -62,7 +61,6 @@ interface Line {
 
 export function LogsPage() {
   const { t } = useTranslation()
-  const isAdmin = useIsAdmin()
   const [level, setLevel] = useState<string>('info')
   const [paused, setPaused] = useState(false)
   const [filter, setFilter] = useState('')
@@ -89,7 +87,6 @@ export function LogsPage() {
   }, [paused])
 
   useEffect(() => {
-    if (!isAdmin) return
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -127,24 +124,13 @@ export function LogsPage() {
       controller.abort()
       if (timer) window.clearTimeout(timer)
     }
-  }, [isAdmin, level, attempt])
+  }, [level, attempt])
 
   const visible = useMemo(() => {
     const needle = filter.trim().toLowerCase()
     if (!needle) return lines
     return lines.filter((line) => line.entry.message.toLowerCase().includes(needle))
   }, [lines, filter])
-
-  if (!isAdmin) {
-    return (
-      <>
-        <PageHeader title={t('logs.title')} />
-        <PageBody>
-          <EmptyState>{t('logs.hiddenFromReadOnly')}</EmptyState>
-        </PageBody>
-      </>
-    )
-  }
 
   return (
     <>

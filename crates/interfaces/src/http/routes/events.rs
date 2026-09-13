@@ -54,6 +54,8 @@ pub const HEARTBEAT: Duration = Duration::from_secs(15);
 /// system from a wiring mistake, and reporting the difference is the whole point
 /// of having the state at all.
 pub async fn stream(State(state): State<AppState>, caller: Caller) -> Result<Response, HttpError> {
+    // The caller is extracted so the request is authenticated.
+    let _ = &caller;
     let Some(source) = state.events.clone() else {
         return Err(HttpError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -62,10 +64,9 @@ pub async fn stream(State(state): State<AppState>, caller: Caller) -> Result<Res
         ));
     };
 
-    // The role decides which events are written, and the filter runs here rather
-    // than in the transport: a stream that emitted everything and relied on the
-    // writer to skip would put the rule in two places.
-    let role = caller.role;
+    // Every event is written. Nothing is withheld per caller any more: the request
+    // is already authenticated, and a caller able to reach this stream could
+    // restart the kernel instead. See `crate::events`.
     let mut stream = source.subscribe();
 
     let body = async_stream::stream! {
@@ -80,9 +81,6 @@ pub async fn stream(State(state): State<AppState>, caller: Caller) -> Result<Res
                 event = stream.next_event() => {
                     match event {
                         Some(event) => {
-                            if !event.is_visible_to(role) {
-                                continue;
-                            }
                             seq += 1;
                             yield Ok::<_, std::io::Error>(line(&event));
                         }
@@ -142,7 +140,6 @@ fn now_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proxy_application::ports::secret_store::Role;
 
     #[test]
     fn a_heartbeat_renders_as_one_line_of_ndjson() {
@@ -206,10 +203,11 @@ mod tests {
         );
     }
 
-    /// The role filter is the endpoint's one authorization rule, so it is asserted
-    /// through the function the handler actually calls.
+    /// A kernel log and a heartbeat both serialise into one NDJSON line, which is
+    /// what this endpoint writes. There is no per-caller filter to assert: every
+    /// subscriber receives every event.
     #[test]
-    fn the_filter_hides_kernel_logs_from_a_read_only_caller() {
+    fn both_a_kernel_log_and_a_heartbeat_serialise_to_one_line() {
         use proxy_application::ports::event_publisher::DomainEvent;
         use proxy_application::ports::types::LogLevel;
 
@@ -222,11 +220,9 @@ mod tests {
             0,
         )
         .expect("mapped");
-        assert!(!log.is_visible_to(Role::ReadOnly));
-        assert!(log.is_visible_to(Role::Admin));
+        assert_eq!(line(&log).iter().filter(|b| **b == b'\n').count(), 1);
 
-        // A heartbeat carries no kernel information, so it reaches everyone: a
-        // read-only client still needs to know its connection is alive.
-        assert!(Event::heartbeat(1, 0).is_visible_to(Role::ReadOnly));
+        let beat = Event::heartbeat(1, 0);
+        assert_eq!(line(&beat).iter().filter(|b| **b == b'\n').count(), 1);
     }
 }

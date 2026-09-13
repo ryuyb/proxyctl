@@ -58,8 +58,6 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 
-use proxy_application::ports::secret_store::Role;
-
 use super::super::error::HttpError;
 use super::super::state::{AppState, Caller};
 use proxy_application::ports::clash_proxy::{ProxyRequest, ProxyResponse, UpstreamTarget};
@@ -138,12 +136,16 @@ pub async fn proxy(
         ));
     };
 
+    let _ = &caller;
     let method = request.method().clone();
 
-    // The method gate, and the whole of this route's authorization.
-    if !is_read_only(&method) && caller.role != Role::Admin {
+    // The method gate, and the whole of this route's authorization. It is a check
+    // on the *method*, not on the caller: the dashboard needs `GET` and its
+    // WebSockets, and a browser page must not be able to reach `PUT /configs`,
+    // which replaces the running configuration.
+    if !is_read_only(&method) {
         return Err(HttpError::from(
-            super::super::auth::AuthError::NotPermitted { uid: 0, gid: 0 },
+            super::super::auth::AuthError::MethodNotAllowed,
         ));
     }
 

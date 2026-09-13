@@ -31,7 +31,6 @@ import {
 } from 'lucide-react'
 
 import { LanguageToggle } from '@/components/language-toggle'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session'
@@ -103,9 +102,6 @@ export function Layout() {
               <div className="truncate text-xs font-medium" title={session?.principal}>
                 {session?.principal}
               </div>
-              <Badge variant="secondary" className="mt-1 text-[10px]">
-                {session ? t(`roles.${session.role}`, { defaultValue: session.role }) : ''}
-              </Badge>
             </div>
             <Button
               variant="ghost"

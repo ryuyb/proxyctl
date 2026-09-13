@@ -133,10 +133,6 @@ pub struct TokenIssueArgs {
     /// The principal's name.
     #[arg(long, value_name = "NAME")]
     pub principal: String,
-
-    /// The role granted.
-    #[arg(long, value_enum, default_value_t = TokenRole::Admin)]
-    pub role: TokenRole,
 }
 
 /// The `token list` arguments.
@@ -157,24 +153,6 @@ pub struct TokenRevokeArgs {
     /// The principal to revoke.
     #[arg(long, value_name = "NAME")]
     pub principal: String,
-}
-
-/// A role a token can grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum TokenRole {
-    /// Full control.
-    Admin,
-    /// Read-only access to status, connections, and reports.
-    ReadOnly,
-}
-
-impl From<TokenRole> for proxy_application::ports::secret_store::Role {
-    fn from(role: TokenRole) -> Self {
-        match role {
-            TokenRole::Admin => Self::Admin,
-            TokenRole::ReadOnly => Self::ReadOnly,
-        }
-    }
 }
 
 /// The `agent` subcommand.

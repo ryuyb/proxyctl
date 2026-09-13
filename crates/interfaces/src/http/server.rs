@@ -12,11 +12,15 @@
 //! sees the correct uid. The cost is this file's accept loop; the benefit is that
 //! the documented local-socket check actually happens.
 //!
-//! # The socket's permissions remain the primary boundary
+//! # What limits who may reach the socket
 //!
-//! Reading a peer credential does not replace the filesystem mode. On a normal
-//! install the socket is `0660` inside a `0750` directory, and the credential check
-//! is only applied when a deployment names the uid or gid it expects.
+//! The agent socket is mode `0666`: reaching it is not the access control. The
+//! caller is established by the agent itself (see [`super::auth`]), and a
+//! successful connection is treated as an operator. A deployment that wants more
+//! than that either configures a uid/gid peer check or narrows the mode.
+//!
+//! This is the opposite of the kernel's socket, where the filesystem mode *is* the
+//! whole boundary because Mihomo does not authenticate on a unix socket.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,9 +94,15 @@ impl SocketSpec {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            // Group-accessible and nothing more. For a socket whose kernel-facing
-            // twin is unauthenticated, this mode is the access-control boundary.
-            mode: 0o660,
+            // Reachable by any local user, because this socket authenticates its
+            // caller itself (`AuthPolicy`) rather than treating file permissions as
+            // the boundary. A deployment that wants the older behaviour sets a
+            // group check or narrows `mode` in its own configuration.
+            //
+            // This is deliberately *not* the mode used for the kernel's socket:
+            // Mihomo does not authenticate on a unix socket, so there the file
+            // permissions are the whole boundary and stay at 0660.
+            mode: 0o666,
         }
     }
 }
@@ -532,8 +542,10 @@ async fn serve_connection(stream: UnixStream, app: axum::Router, state: AppState
 /// Returns the caller, or a reason the connection must be refused.
 fn read_caller(stream: &UnixStream, state: &AppState) -> Result<super::state::Caller, String> {
     if !state.auth.checks_peer_credential() {
-        // The socket's own permissions are the boundary. Reading the credential
-        // adds nothing here, so a read failure is not a reason to refuse.
+        // No peer check is configured, so this connection is an operator by
+        // virtue of having connected. The credential is still read for the audit
+        // identity, and a read failure is not a reason to refuse: nothing was
+        // relying on it.
         let (uid, gid) = stream
             .peer_cred()
             .map(|cred| (cred.uid(), cred.gid()))

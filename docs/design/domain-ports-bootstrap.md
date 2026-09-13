@@ -922,11 +922,12 @@ pub trait SecretStore: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Principal { pub id: String, pub role: Role }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role { Admin, ReadOnly }
+pub struct Principal { pub id: String }
 ```
+
+> 早期草案里 `Principal` 还带一个 `Role { Admin, ReadOnly }`。它已被删除：
+> 认证是唯一的授权维度，见 ADR-010 D12。`sessions.role` 与 `api_principals.role`
+> 两列也随之在 schema v5 中移除。
 
 ```rust
 // application/src/ports/audit_sink.rs

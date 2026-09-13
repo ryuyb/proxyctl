@@ -68,10 +68,18 @@ async fn composition_opens_the_metadata_store() {
     );
 }
 
-/// The socket directory's permissions are the access-control boundary for a
-/// kernel that does not authenticate over its socket, so they must not be loose.
+/// The run directory holds two sockets with opposite requirements, and the
+/// property asserted here is what reconciles them.
+///
+/// `agent.sock` is `0666` and authenticates its caller itself, so the directory
+/// must stay *traversable* by any local user — a directory that denied `x` to
+/// others would block the client before it could present anything.
+///
+/// `mihomo.sock` is unauthenticated, so it may not be replaced by another user;
+/// denying write to others is what prevents that. The kernel socket's own `0660`
+/// is the second half of that protection.
 #[tokio::test]
-async fn the_run_directory_is_not_world_accessible() {
+async fn the_run_directory_is_traversable_but_not_writable() {
     let dir = tempfile::tempdir().expect("dir");
     compose(dir.path(), |_| {}).await;
 
@@ -80,10 +88,18 @@ async fn the_run_directory_is_not_world_accessible() {
         .expect("metadata")
         .permissions()
         .mode();
+
     assert_eq!(
-        mode & 0o007,
+        mode & 0o002,
         0,
-        "the socket directory must not be world-accessible (mode {mode:o})"
+        "the socket directory must not be world-writable, or a local user could \
+         replace a socket (mode {mode:o})"
+    );
+    assert_eq!(
+        mode & 0o001,
+        0o001,
+        "the socket directory must stay traversable so a local client can reach \
+         the authenticated agent socket (mode {mode:o})"
     );
 }
 
@@ -102,10 +118,11 @@ async fn the_configs_directory_is_not_world_accessible() {
     assert_eq!(mode & 0o007, 0, "mode {mode:o}");
 }
 
-/// A directory that already exists with loose permissions must be tightened,
-/// not accepted. Silently accepting it would leave the control plane open.
+/// A directory that already exists world-writable must be tightened, not
+/// accepted: a world-writable directory lets one local user unlink and replace
+/// another's socket, which is the protection the kernel socket depends on.
 #[tokio::test]
-async fn an_existing_loose_directory_is_tightened() {
+async fn an_existing_world_writable_directory_is_tightened() {
     let dir = tempfile::tempdir().expect("dir");
     let run_dir = dir.path().join("run");
     std::fs::create_dir_all(&run_dir).expect("mkdir");
@@ -118,9 +135,9 @@ async fn an_existing_loose_directory_is_tightened() {
         .permissions()
         .mode();
     assert_eq!(
-        mode & 0o007,
+        mode & 0o002,
         0,
-        "a pre-existing world-accessible directory must be tightened (mode {mode:o})"
+        "a pre-existing world-writable directory must be tightened (mode {mode:o})"
     );
 }
 
@@ -243,13 +260,15 @@ async fn a_root_under_a_foreign_parent_composes() {
         .await
         .expect("a foreign parent must not abort preparation");
 
-    // The directories it created must still carry the restrictive mode.
+    // The directories it created must still carry the documented mode: no write
+    // to others, but traversable so a local client can reach the agent socket.
     let run_dir = dir.path().join("run");
     let mode = std::fs::metadata(&run_dir)
         .expect("metadata")
         .permissions()
         .mode();
-    assert_eq!(mode & 0o007, 0, "mode {mode:o}");
+    assert_eq!(mode & 0o002, 0, "mode {mode:o}");
+    assert_eq!(mode & 0o001, 0o001, "mode {mode:o}");
 }
 
 /// A world-accessible directory that cannot be tightened must be refused rather

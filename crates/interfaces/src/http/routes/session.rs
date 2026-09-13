@@ -29,7 +29,6 @@ use axum::extract::State;
 use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::response::{IntoResponse, Response};
 
-use proxy_application::ports::secret_store::Role;
 use proxy_application::ports::session_store::SessionId;
 
 use crate::dto::{SessionDto, SessionInput};
@@ -65,7 +64,7 @@ pub async fn sign_in(
     let id = state
         .ctx
         .sessions
-        .create(&principal.id, principal.role, now)
+        .create(&principal.id, now)
         .await
         .map_err(HttpError::from)?;
 
@@ -79,7 +78,6 @@ pub async fn sign_in(
         [(SET_COOKIE, cookie)],
         Json(SessionDto {
             principal: principal.id,
-            role: describe(principal.role),
         }),
     )
         .into_response())
@@ -117,7 +115,6 @@ pub async fn sign_out(State(state): State<AppState>, headers: axum::http::Header
 pub async fn current(caller: Caller) -> Result<Json<SessionDto>, HttpError> {
     Ok(Json(SessionDto {
         principal: caller.id,
-        role: describe(caller.role),
     }))
 }
 
@@ -163,14 +160,6 @@ static BEHIND_TLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// than panicking, because a second listener starting should not abort the process.
 pub fn set_behind_tls(behind: bool) {
     BEHIND_TLS.store(behind, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// A stable label for a role.
-fn describe(role: Role) -> String {
-    match role {
-        Role::Admin => "admin".to_owned(),
-        Role::ReadOnly => "read-only".to_owned(),
-    }
 }
 
 /// The current time in Unix seconds.
@@ -237,13 +226,5 @@ mod tests {
         assert!(cleared.starts_with("proxyctl_session="), "{cleared}");
         assert!(cleared.contains("Path=/"), "{cleared}");
         assert!(cleared.contains("Max-Age=0"), "{cleared}");
-    }
-
-    /// Roles are labelled as the rest of the interface labels them, so a client
-    /// comparing strings sees one spelling.
-    #[test]
-    fn roles_are_labelled_consistently() {
-        assert_eq!(describe(Role::Admin), "admin");
-        assert_eq!(describe(Role::ReadOnly), "read-only");
     }
 }

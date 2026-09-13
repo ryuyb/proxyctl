@@ -20,14 +20,14 @@ pnpm check            # typecheck, lint, test, build — the gate
 
 `pnpm dev` proxies to an agent at `http://127.0.0.1:9090`. Point it elsewhere
 with `PROXYCTL_DEV_TARGET`. There is no mock: the interface is developed against
-a real agent, because auth, streaming, and role visibility are precisely the
+a real agent, because auth and streaming are precisely the
 things a mock would get wrong by construction.
 
 ### Running an agent to develop against
 
 ```bash
 # On the agent host. `[api] bind` requires a token first — see ADR-010 D9.
-proxyctl token issue --principal dev --role admin
+proxyctl token issue --principal dev
 proxyctl agent run --config /etc/proxy-agent/config.toml
 ```
 
@@ -113,15 +113,12 @@ proxy does not buffer this stream — heartbeats arrive 15s apart, on schedule.*
 answer is the sign-in page. `fetchSession` converts it to `null` rather than
 letting every call site special-case it.
 
-**Role gating is cosmetic.** `useIsAdmin()` decides which controls are drawn. The
-boundary is the agent: it refuses a write from a read-only session and strips
-`uid`/`process`/`process_path` from a connection list before serialising it. A
-reader can edit anything in this bundle.
-
-**The connection's process columns are conditional for that reason.** A read-only
-session receives a payload without those fields, and drawing three empty columns
-would invite the reader to conclude the agent looked and found nothing. A note
-says otherwise.
+**There is no role gating, and that is deliberate.** Every signed-in caller may do
+everything, so no control is drawn conditionally and the connection list always
+carries `uid`/`process`/`process_path`. An earlier version had a `useIsAdmin()` that
+hid controls from a read-only session; it was removed along with the agent-side role
+model, because hiding a button describes a boundary the agent does not enforce. If
+you are looking for it, it is gone on purpose — see ADR-010 D12.
 
 **Every user-facing string goes through i18n**, except the agent's own messages.
 A failure reason, a log line, a doctor finding's text: those arrive from the agent
@@ -180,7 +177,7 @@ test cannot start for itself. It skips when none answers.
 
 ```bash
 # On the agent host
-proxyctl token issue --principal smoke --role admin
+proxyctl token issue --principal smoke
 proxyctl agent run --config /etc/proxy-agent/config.toml
 
 # Here — `pnpm build` first, since the agent serves the *embedded* bundle

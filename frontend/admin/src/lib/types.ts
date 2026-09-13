@@ -34,8 +34,6 @@ export type CapabilityStatus =
 /** How serious a doctor finding is. */
 export type Severity = 'pass' | 'info' | 'warning' | 'error'
 
-/** A caller's role. */
-export type Role = 'admin' | 'read-only'
 
 /** The kernel's lifecycle summary. */
 export interface Status {
@@ -219,7 +217,6 @@ export interface CloseResult {
 /** Who is signed in. */
 export interface Session {
   principal: string
-  role: Role
 }
 
 /** A created or updated resource's identifier. */

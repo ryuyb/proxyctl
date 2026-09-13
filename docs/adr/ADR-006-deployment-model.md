@@ -154,7 +154,7 @@ loopback **不豁免**，理由与实现见 ADR-010 D9。
 **跨机访问的最小配置**（这是最常被问到的场景）：
 
 ```bash
-proxyctl token issue --config /etc/proxy-agent/config.toml --principal me --role admin
+proxyctl token issue --config /etc/proxy-agent/config.toml --principal me
 # 把 bind 写进 /etc/proxy-agent/config.toml 后重启 agent
 # 另一台机器：http://<服务器IP>:8765
 ```

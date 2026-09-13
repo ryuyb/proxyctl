@@ -142,14 +142,17 @@ sudo systemctl start proxy-agent
 # 2. Install a kernel. The version is required — there is no "latest" shorthand,
 #    because the agent verifies the artifact against a checksum and picking a
 #    version is a decision rather than a default.
-sudo -u proxy-agent proxyctl mihomo update v1.19.30
+proxyctl mihomo update v1.19.30
 
 # 3. See what this environment can actually do
-sudo -u proxy-agent proxyctl doctor
+proxyctl doctor
 
 # 4. Start the kernel
-sudo -u proxy-agent proxyctl start
+proxyctl start
 ```
+
+No `sudo` and no group membership: any local user can talk to the agent. See
+[Who can use it](#who-can-use-it).
 
 ### Start the service, not the binary
 
@@ -161,36 +164,39 @@ sudo systemctl start proxy-agent
 created and the agent prints that it is listening — and it puts you in a worse
 place than not starting it at all:
 
-* the socket is created as `root:root`, so the `proxy-agent` user cannot open it
-  and neither can you;
 * the process is in your terminal, so `Ctrl-C` leaves a socket file behind with
   nothing listening on it;
-* `systemctl` cannot see it, manage it, or restart it.
+* `systemctl` cannot see it, manage it, or restart it;
+* the state and configuration directories are wherever you happened to be, not
+  the packaged locations.
 
 The unit exists for exactly this reason: it names the user, creates the runtime
 directory with the right mode, and grants only `CAP_NET_ADMIN`.
 
-If you want to run it by hand for development, run it as the service user:
+### Who can use it
 
-```bash
-sudo -u proxy-agent proxyctl agent run --config /path/to/config.toml
+The agent socket is mode `0666`: **any local user can reach it**, and the agent
+authenticates the caller itself rather than treating the file permissions as the
+boundary. That is deliberate — the client is meant to work without anyone being
+added to a dedicated group.
+
+What this means in practice:
+
+* on a single-user server, or inside a container, it is exactly as convenient as
+  it sounds: install, start the service, use `proxyctl` as yourself;
+* on a machine with several untrusted local users, any of them can manage the
+  kernel through the socket. If that matters to you, tighten it — either narrow
+  the socket mode, or configure a peer check in `config.toml`:
+
+```toml
+[agent]
+socket_allowed_uid = 1000   # only this uid may connect
+# socket_allowed_gid = 1000 # or a group, or both
 ```
 
-### Why `sudo -u proxy-agent`
-
-The agent socket is `0660` inside a `0750` directory, owned by `proxy-agent`. That
-is the access-control boundary: whoever can open the socket can manage the kernel.
-Your own user is not in that group by default, so either prefix commands with
-`sudo -u proxy-agent`, or add yourself once:
-
-```bash
-sudo usermod -aG proxy-agent "$USER"    # then log out and back in
-```
-
-The symptom of getting this wrong is worth recognising, because it does not look
-like a permissions problem: `proxyctl status` says the agent is not reachable
-*while it is running*. That is what the socket is for — a command that could reach
-it would be one that could manage the kernel.
+The kernel's own socket is a different matter and stays tight: Mihomo does not
+authenticate on a unix socket, so `mihomo.sock` is `0660` and its directory
+denies write access to everyone else.
 
 To reach the web interface from another machine, set the listener in the
 configuration:
@@ -224,7 +230,7 @@ proxyctl config rollback ID     # back to a version that worked
 proxyctl subscription list
 proxyctl subscription update NAME
 
-proxyctl connections            # live connections, with process details for admins
+proxyctl connections            # live connections, including process details
 proxyctl logs -f                # follow the kernel's log
 proxyctl jobs                   # what has run recently
 proxyctl audit                  # who did what
@@ -264,7 +270,7 @@ jobs, the audit trail, and live connections. It needs a session, which needs a
 token:
 
 ```bash
-sudo -u proxy-agent proxyctl token issue --principal admin --role admin
+proxyctl token issue --principal admin
 ```
 
 **The dashboard** (`/ui`) is [metacubexd](https://github.com/MetaCubeX/metacubexd),
@@ -297,7 +303,7 @@ variable** (`PROXYCTL_*`) → **this file** → **the built-in default**. To see
 is actually in effect and which source supplied each value:
 
 ```bash
-sudo -u proxy-agent proxyctl agent run --print-config
+proxyctl agent run --print-config
 ```
 
 Every path is configurable, and nothing hard-codes the packaged defaults. The
@@ -307,12 +313,18 @@ three directories come from `[paths]`, and the socket from `[agent] socket`.
 
 ## Security
 
-The short version: the socket's permissions are the boundary, TCP requires a
-token, and the browser gets a cookie rather than a credential.
+The short version: authentication is the only authorization step — there are no
+roles, and anything that gets past it may do anything. The local socket trusts
+anyone who can reach it, TCP requires a token, and the browser gets a cookie
+rather than a credential.
 
-* **Unix socket.** `0660` in a `0750` directory. The peer credential
-  (`SO_PEERCRED`) is an *optional second* check, off by default because LXC uid
-  mapping can make a correct peer look wrong.
+* **Unix socket (agent).** Mode `0666`, in a traversable directory. The agent
+  authenticates the caller itself; reaching the socket *is* being an operator. The
+  peer credential (`SO_PEERCRED`) is an *optional additional* check, off by
+  default because LXC uid mapping can make a correct peer look wrong. This is the
+  deliberate trade described under [Who can use it](#who-can-use-it).
+* **Unix socket (kernel).** `0660`, and this one *is* the boundary: Mihomo does
+  not verify its secret on a unix socket, so the file mode is all there is.
 * **TCP.** A token is required, with **no loopback exemption** — loopback is not a
   trust boundary on a host that also runs untrusted software. Configuring a
   listener requires at least one token to exist, or the agent refuses to start.
@@ -323,6 +335,10 @@ token, and the browser gets a cookie rather than a credential.
   own all-in-one server puts its control token in the browser instead; this does
   not.
 * **The kernel controller** is never bound to a public interface by default.
+* **No roles.** Every authenticated caller can do everything. The `/clash-api`
+  relay is the one place a *method* is refused (`GET`/`HEAD`/`OPTIONS` only),
+  because that gate stops a page from replacing the kernel's running
+  configuration — it is not a restriction on who is asking.
 
 Full reasoning is in [`docs/adr/`](docs/adr/) and in the
 [`AGENTS.md`](AGENTS.md) security section.
@@ -351,8 +367,8 @@ makes it testable without any of them.
 /etc/proxy-agent/config.toml        configuration        (0600)
 /var/lib/proxy-agent/configs/       immutable versions
 /var/lib/proxy-agent/database.sqlite
-/run/proxy-agent/agent.sock         the agent        (0750 dir, 0660 socket)
-/run/proxy-agent/mihomo.sock        the kernel
+/run/proxy-agent/agent.sock         the agent        (0666; any local user)
+/run/proxy-agent/mihomo.sock        the kernel       (0660)
 ```
 
 **Documentation at this stage** — the reasoning, the measurements, and the

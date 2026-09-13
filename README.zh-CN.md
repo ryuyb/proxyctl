@@ -122,14 +122,16 @@ sudo systemctl start proxy-agent
 
 # 2. 安装内核。版本号是必填的 —— 没有 "latest" 简写，
 #    因为 agent 会校验产物的 checksum，且选择哪个版本是一个决定，而非默认值。
-sudo -u proxy-agent proxyctl mihomo update v1.19.30
+proxyctl mihomo update v1.19.30
 
 # 3. 看看这个环境实际能做什么
-sudo -u proxy-agent proxyctl doctor
+proxyctl doctor
 
 # 4. 启动内核
-sudo -u proxy-agent proxyctl start
+proxyctl start
 ```
+
+不需要 `sudo`，也不需要加入任何组：本机任何用户都能直接使用 agent。见[谁能用](#谁能用)。
 
 ### 用服务启动，而不是直接跑二进制
 
@@ -139,27 +141,28 @@ sudo systemctl start proxy-agent
 
 **不要运行 `sudo proxyctl agent run`。** 它看起来能跑 —— socket 建出来了，agent 也打印了监听地址 —— 但结果比不启动更糟：
 
-* socket 属主是 `root:root`，`proxy-agent` 用户打不开，你也打不开；
 * 进程挂在你的终端里，`Ctrl-C` 之后会留下一个没有监听者的 socket 文件；
-* `systemctl` 看不到它，管不了它，也重启不了它。
+* `systemctl` 看不到它，管不了它，也重启不了它；
+* 状态目录和配置目录会落在你当时所在的目录，而不是打包好的位置。
 
 unit 存在的理由就是这个：它指定了用户、用正确的权限创建运行目录、并且只授予 `CAP_NET_ADMIN`。
 
-如果你想手工跑（开发场景），以服务用户的身份运行：
+### 谁能用
 
-```bash
-sudo -u proxy-agent proxyctl agent run --config /path/to/config.toml
+agent socket 的权限是 `0666`：**本机任何用户都能连上它**，而且 agent 自己做调用方认证，不把文件权限当作边界。这是刻意的 —— 目标是客户端开箱可用，不需要把谁加进某个专用组。
+
+实际含义：
+
+* 单用户服务器、或者容器里，用起来就真的这么简单：装完、起服务、直接用自己的账号跑 `proxyctl`；
+* 如果机器上有多个互不信任的本地用户，那么他们当中任何一个都能通过这个 socket 管理内核。如果你在意这点，就收紧它 —— 要么改窄 socket 权限，要么在 `config.toml` 里配对端校验：
+
+```toml
+[agent]
+socket_allowed_uid = 1000   # 只有这个 uid 能连
+# socket_allowed_gid = 1000 # 或者按组，或者两个都配
 ```
 
-### 为什么要 `sudo -u proxy-agent`
-
-agent socket 是 `0750` 目录下的 `0660` 文件，属主为 `proxy-agent`。**这就是访问控制的边界**：谁能打开这个 socket，谁就能管理内核。你自己的用户默认不在该组里，所以要么给命令加 `sudo -u proxy-agent`，要么把自己加进去：
-
-```bash
-sudo usermod -aG proxy-agent "$USER"    # 之后需要重新登录
-```
-
-搞错时的症状值得记住，因为它看起来不像权限问题：**agent 明明在跑，`proxyctl status` 却说连不上。** 这正是 socket 的作用 —— 能连上就意味着能管理内核。
+内核自己的 socket 是另一回事，它保持很紧：Mihomo 在 unix socket 上**不校验** secret，所以 `mihomo.sock` 是 `0660`，其所在目录也拒绝其他人的写权限。
 
 要从另一台机器访问 Web 界面，在配置里设置监听：
 
@@ -226,7 +229,7 @@ proxyctl tui                    # 终端界面
 **自研管理界面**（`/`）覆盖本项目自己负责的部分：生命周期、配置版本与回滚、订阅、能力、医生、近期任务、审计记录、实时连接。它需要会话，而会话需要 token：
 
 ```bash
-sudo -u proxy-agent proxyctl token issue --principal admin --role admin
+proxyctl token issue --principal admin
 ```
 
 **仪表盘**（`/ui`）是 [metacubexd](https://github.com/MetaCubeX/metacubexd) —— 上游自己的项目，以构建产物形态内嵌。它负责代理组切换、逐节点延迟测试、流量图表、规则查看 —— 这些是本项目**刻意没有重建**的部分。
@@ -250,7 +253,7 @@ sudo -u proxy-agent proxyctl token issue --principal admin --role admin
 取值优先级从高到低：**命令行参数** → **环境变量**（`PROXYCTL_*`）→ **本文件** → **内置默认值**。想看实际生效的值以及每个值来自哪里：
 
 ```bash
-sudo -u proxy-agent proxyctl agent run --print-config
+proxyctl agent run --print-config
 ```
 
 **所有路径都可配置**，没有任何地方硬编码打包时的默认值。三个目录来自 `[paths]`，socket 来自 `[agent] socket`。
@@ -259,13 +262,15 @@ sudo -u proxy-agent proxyctl agent run --print-config
 
 ## 安全
 
-简版：**socket 权限就是边界**，TCP 必须带 token，浏览器拿到的是 cookie 而非凭证。
+简版：**认证是唯一的授权环节** —— 没有角色，通过认证就能做任何事。本地 socket 信任任何能连上它的人，TCP 必须带 token，浏览器拿到的是 cookie 而非凭证。
 
-* **Unix socket。** `0750` 目录下的 `0660`。对端凭证（`SO_PEERCRED`）是**可选的第二道**检查，默认关闭 —— 因为 LXC 的 uid 映射会让正确的对端看起来不对。
+* **Unix socket（agent）。** 权限 `0666`，位于一个可穿越的目录。agent 自己做调用方认证；能连上 socket 就等于拥有操作员身份。对端凭证（`SO_PEERCRED`）是**额外可选**的检查，默认关闭 —— 因为 LXC 的 uid 映射会让正确的对端看起来不对。这是[谁能用](#谁能用)里说明的刻意取舍。
+* **Unix socket（内核）。** `0660`，这一个**就是**边界：Mihomo 在 unix socket 上不校验 secret，文件权限就是全部。
 * **TCP。** 必须有 token，且**没有 loopback 豁免** —— 在同样运行着不可信软件的机器上，loopback 不是信任边界。配置监听时至少要存在一个 token，否则 agent 拒绝启动。
 * **浏览器**用 token 换取 `HttpOnly; SameSite=Strict` 的 cookie。**刻意没有 CSRF token**：那要求它可被脚本读取，而这正是 cookie 方案要避免的问题。
 * **内核 secret 永远不会到达页面。** 由反代注入。上游自己的 all-in-one server 是把控制 token 放进浏览器的；这里不这么做。
 * **内核控制口**默认绝不绑定到公网接口。
+* **没有角色。** 任何通过认证的调用方都能做所有事。唯一会拒绝的是 `/clash-api` 上的 **HTTP 方法**（只放行 `GET`/`HEAD`/`OPTIONS`），因为它防的是页面替换内核运行配置 —— 那不是对「谁在问」的限制。
 
 完整推理在 [`docs/adr/`](docs/adr/) 与 [`AGENTS.md`](AGENTS.md) 的安全章节。
 
@@ -291,7 +296,7 @@ crates/
 /etc/proxy-agent/config.toml        配置              (0600)
 /var/lib/proxy-agent/configs/       不可变版本
 /var/lib/proxy-agent/database.sqlite
-/run/proxy-agent/agent.sock         agent        (0750 目录 / 0660 socket)
+/run/proxy-agent/agent.sock         agent        (0666，本机任何用户)
 /run/proxy-agent/mihomo.sock        内核
 ```
 

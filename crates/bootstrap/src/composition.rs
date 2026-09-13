@@ -464,9 +464,18 @@ const DATA_DIR_MODE: u32 = 0o750;
 
 /// Permissions for the runtime directory, which holds the control socket.
 ///
-/// Group-accessible and nothing more: for a unix socket the kernel does not
-/// authenticate, so these permissions are the entire access-control boundary.
-const RUN_DIR_MODE: u32 = 0o750;
+/// The kernel does not authenticate on a unix socket, so this directory and the
+/// socket inside it are the whole boundary for the kernel — which is why the
+/// `mihomo.sock` file itself stays `0660`.
+///
+/// The *directory* is `0751`, not `0750`: it is normally shared with `agent.sock`,
+/// which is meant to be reachable by any local user and authenticates the caller
+/// itself. A directory that denies `x` to others would block those clients before
+/// they could present anything, so it must remain traversable; write access is
+/// still denied, which is what prevents one user from replacing another's socket.
+///
+/// The kernel socket's own `0660` is what keeps the kernel protected either way.
+const RUN_DIR_MODE: u32 = 0o751;
 
 /// Whether a directory's mode must end up restrictive, or merely preferably so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

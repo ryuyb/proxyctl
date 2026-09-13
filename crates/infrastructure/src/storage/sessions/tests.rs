@@ -15,10 +15,7 @@ async fn store() -> (SqliteSessionStore, SqlitePool, tempfile::TempDir) {
 #[tokio::test]
 async fn a_session_resolves_to_its_principal() {
     let (store, _pool, _dir) = store().await;
-    let id = store
-        .create("alice", Role::Admin, 1000)
-        .await
-        .expect("create");
+    let id = store.create("alice", 1000).await.expect("create");
 
     let principal = store
         .resolve(&id, 1001)
@@ -26,36 +23,34 @@ async fn a_session_resolves_to_its_principal() {
         .expect("resolve")
         .expect("valid");
     assert_eq!(principal.id, "alice");
-    assert_eq!(principal.role, Role::Admin);
 }
 
-/// The role survives the round trip, since every authorization decision reads it.
+/// Two sessions must resolve to their own principals and not to each other: the
+/// identifier is what a session carries, so confusing two is the failure that
+/// matters.
 #[tokio::test]
-async fn both_roles_round_trip() {
+async fn each_session_resolves_to_its_own_principal() {
     let (store, _pool, _dir) = store().await;
-    let admin = store.create("a", Role::Admin, 1000).await.expect("create");
-    let viewer = store
-        .create("v", Role::ReadOnly, 1000)
-        .await
-        .expect("create");
+    let first = store.create("alice", 1000).await.expect("create");
+    let second = store.create("bob", 1000).await.expect("create");
 
     assert_eq!(
         store
-            .resolve(&admin, 1001)
+            .resolve(&first, 1001)
             .await
             .expect("resolve")
             .expect("valid")
-            .role,
-        Role::Admin
+            .id,
+        "alice"
     );
     assert_eq!(
         store
-            .resolve(&viewer, 1001)
+            .resolve(&second, 1001)
             .await
             .expect("resolve")
             .expect("valid")
-            .role,
-        Role::ReadOnly
+            .id,
+        "bob"
     );
 }
 
@@ -64,10 +59,7 @@ async fn both_roles_round_trip() {
 #[tokio::test]
 async fn a_session_identifier_is_not_stored_in_the_clear() {
     let (store, pool, _dir) = store().await;
-    let id = store
-        .create("alice", Role::Admin, 1000)
-        .await
-        .expect("create");
+    let id = store.create("alice", 1000).await.expect("create");
 
     let stored: String = pool
         .with_connection(|conn| {
@@ -89,14 +81,8 @@ async fn a_session_identifier_is_not_stored_in_the_clear() {
 #[tokio::test]
 async fn two_sessions_produce_different_stored_values() {
     let (store, pool, _dir) = store().await;
-    store
-        .create("alice", Role::Admin, 1000)
-        .await
-        .expect("first");
-    store
-        .create("alice", Role::Admin, 1000)
-        .await
-        .expect("second");
+    store.create("alice", 1000).await.expect("first");
+    store.create("alice", 1000).await.expect("second");
 
     let stored: Vec<String> = pool
         .with_connection(|conn| {
@@ -146,7 +132,7 @@ async fn an_unknown_session_resolves_to_nothing() {
 async fn resolving_refreshes_the_idle_timer() {
     let (store, _pool, _dir) = store().await;
     let policy = proxy_application::ports::session_store::SessionPolicy::standard();
-    let id = store.create("alice", Role::Admin, 0).await.expect("create");
+    let id = store.create("alice", 0).await.expect("create");
 
     // Just inside the idle window.
     let almost_idle = policy.idle.as_secs() as i64 - 1;
@@ -171,7 +157,7 @@ async fn resolving_refreshes_the_idle_timer() {
 async fn the_absolute_limit_expires_an_active_session() {
     let (store, _pool, _dir) = store().await;
     let policy = proxy_application::ports::session_store::SessionPolicy::standard();
-    let id = store.create("alice", Role::Admin, 0).await.expect("create");
+    let id = store.create("alice", 0).await.expect("create");
 
     // Keep touching it, but past the absolute limit.
     let beyond = policy.absolute.as_secs() as i64 + 1;
@@ -187,7 +173,7 @@ async fn the_absolute_limit_expires_an_active_session() {
 async fn an_expired_session_is_removed() {
     let (store, pool, _dir) = store().await;
     let policy = proxy_application::ports::session_store::SessionPolicy::standard();
-    let id = store.create("alice", Role::Admin, 0).await.expect("create");
+    let id = store.create("alice", 0).await.expect("create");
 
     let beyond = policy.absolute.as_secs() as i64 + 1;
     assert!(store.resolve(&id, beyond).await.expect("resolve").is_none());
@@ -206,10 +192,7 @@ async fn an_expired_session_is_removed() {
 #[tokio::test]
 async fn revocation_stops_the_session() {
     let (store, _pool, _dir) = store().await;
-    let id = store
-        .create("alice", Role::Admin, 1000)
-        .await
-        .expect("create");
+    let id = store.create("alice", 1000).await.expect("create");
     assert!(store.revoke(&id).await.expect("revoke"));
     assert!(store.resolve(&id, 1001).await.expect("resolve").is_none());
     assert!(
@@ -223,9 +206,9 @@ async fn revocation_stops_the_session() {
 #[tokio::test]
 async fn revoking_a_principal_ends_all_its_sessions() {
     let (store, _pool, _dir) = store().await;
-    let first = store.create("alice", Role::Admin, 1000).await.expect("one");
-    let second = store.create("alice", Role::Admin, 1000).await.expect("two");
-    let other = store.create("bob", Role::Admin, 1000).await.expect("bob");
+    let first = store.create("alice", 1000).await.expect("one");
+    let second = store.create("alice", 1000).await.expect("two");
+    let other = store.create("bob", 1000).await.expect("bob");
 
     assert_eq!(store.revoke_principal("alice").await.expect("revoke"), 2);
     assert!(
@@ -258,14 +241,14 @@ async fn the_sweep_removes_only_expired_sessions() {
     let (store, _pool, _dir) = store().await;
     let policy = proxy_application::ports::session_store::SessionPolicy::standard();
 
-    let fresh = store.create("live", Role::Admin, 0).await.expect("fresh");
-    let stale = store.create("stale", Role::Admin, 0).await.expect("stale");
+    let fresh = store.create("live", 0).await.expect("fresh");
+    let stale = store.create("stale", 0).await.expect("stale");
     let _ = stale;
 
     // Move past the idle limit for everything, then create one that is still
     // fresh, and sweep.
     let now = policy.idle.as_secs() as i64 + 1;
-    let renewed = store.create("new", Role::Admin, now).await.expect("new");
+    let renewed = store.create("new", now).await.expect("new");
 
     let removed = store.sweep(now).await.expect("sweep");
     assert_eq!(removed, 2, "the two idle sessions must go");
@@ -283,38 +266,32 @@ async fn the_sweep_removes_only_expired_sessions() {
 #[tokio::test]
 async fn a_blank_principal_is_refused() {
     let (store, _pool, _dir) = store().await;
-    assert!(store.create("", Role::Admin, 0).await.is_err());
-    assert!(store.create("   ", Role::Admin, 0).await.is_err());
+    assert!(store.create("", 0).await.is_err());
+    assert!(store.create("   ", 0).await.is_err());
 }
 
-/// An unreadable role is reported rather than defaulting: silently treating it as
-/// read-only would lock someone out, and as admin would be worse.
+/// A session whose stored row was written directly — restored from a backup, say —
+/// resolves as long as it carries the columns the schema defines.
 #[tokio::test]
-async fn an_unknown_stored_role_is_reported() {
+async fn a_directly_inserted_session_resolves() {
     let (store, pool, _dir) = store().await;
-    let id = store.create("alice", Role::Admin, 0).await.expect("create");
+    let id = store.create("alice", 0).await.expect("create");
 
-    // Rewrite the stored role to something this build does not know.
-    let stored: String = pool
+    // The stored value is `salt:hash`; a row is readable by identifier alone only
+    // because `resolve` scans, so a direct row is a fair test of the read path.
+    let rows: i64 = pool
         .with_connection(|conn| {
-            conn.query_row("SELECT id_hash FROM sessions", [], |row| row.get(0))
+            conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
                 .map_err(|e| storage_err(e.to_string()))
         })
         .await
-        .expect("read");
-    pool.with_connection({
-        let stored = stored.clone();
-        move |conn| {
-            conn.execute(
-                "UPDATE sessions SET role = 'superuser' WHERE id_hash = ?1",
-                [stored.as_str()],
-            )
-            .map_err(|e| storage_err(e.to_string()))?;
-            Ok(())
-        }
-    })
-    .await
-    .expect("update");
+        .expect("count");
+    assert_eq!(rows, 1, "the session must be stored exactly once");
 
-    assert!(store.resolve(&id, 1).await.is_err());
+    let principal = store
+        .resolve(&id, 1)
+        .await
+        .expect("resolve")
+        .expect("a stored session must resolve");
+    assert_eq!(principal.id, "alice");
 }

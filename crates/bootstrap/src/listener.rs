@@ -73,7 +73,7 @@ impl ListenerRefusal {
             Self::NoToken { bind } => format!(
                 "refusing to listen on {bind}: no API token has been issued, and over TCP a token \
                  is the only thing identifying a caller. Issue one with \
-                 `proxyctl token issue --principal <name> --role admin`, or remove [api] bind to \
+                 `proxyctl token issue --principal <name>`, or remove [api] bind to \
                  keep the agent on the unix socket only"
             ),
         }

@@ -10,29 +10,18 @@ use async_trait::async_trait;
 use crate::ports::error::PortError;
 
 /// An authenticated caller.
+///
+/// There is deliberately no `role`. This interface once had one — `Admin` versus
+/// `ReadOnly` — and it was removed rather than left in place: the local socket
+/// treats any reachable caller as an operator, so a role could only ever be
+/// enforced on the TCP path, where a token is already required and issued by the
+/// operator. A permission model that one of two transports cannot apply, and whose
+/// narrower level no shipped client ever used, is a model that invites a reader to
+/// believe in a boundary that is not there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
     /// Stable identifier, used in audit records.
     pub id: String,
-    /// What the caller may do.
-    pub role: Role,
-}
-
-impl Principal {
-    /// Whether the principal may perform state-changing operations.
-    #[must_use]
-    pub const fn can_write(&self) -> bool {
-        matches!(self.role, Role::Admin)
-    }
-}
-
-/// Authorization level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    /// Full control.
-    Admin,
-    /// Read-only access to status and reports.
-    ReadOnly,
 }
 
 /// Generates and verifies credentials.
@@ -65,7 +54,7 @@ pub trait SecretStore: Send + Sync {
     ///
     /// Issuing for an existing principal **replaces** its token, which is how
     /// rotation is expressed without a separate method.
-    async fn issue_api_token(&self, principal: &str, role: Role) -> Result<String, PortError>;
+    async fn issue_api_token(&self, principal: &str) -> Result<String, PortError>;
 
     /// List principals without anything that could authenticate one.
     async fn list_api_tokens(&self) -> Result<Vec<PrincipalSummary>, PortError>;
@@ -82,27 +71,6 @@ pub trait SecretStore: Send + Sync {
 pub struct PrincipalSummary {
     /// Stable identifier.
     pub id: String,
-    /// What the principal may do.
-    pub role: Role,
     /// When the token was issued, in Unix seconds.
     pub created_at: i64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn admin_can_write_readonly_cannot() {
-        let admin = Principal {
-            id: "a".into(),
-            role: Role::Admin,
-        };
-        let viewer = Principal {
-            id: "v".into(),
-            role: Role::ReadOnly,
-        };
-        assert!(admin.can_write());
-        assert!(!viewer.can_write());
-    }
 }

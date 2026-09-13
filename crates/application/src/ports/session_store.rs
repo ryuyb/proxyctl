@@ -24,7 +24,7 @@
 use async_trait::async_trait;
 
 use crate::ports::error::PortError;
-use crate::ports::secret_store::{Principal, Role};
+use crate::ports::secret_store::Principal;
 
 /// A session's identifier, as handed to the browser.
 ///
@@ -101,7 +101,7 @@ pub trait SessionStore: Send + Sync {
     /// # Errors
     ///
     /// Returns [`PortError::Storage`] when the session cannot be persisted.
-    async fn create(&self, principal: &str, role: Role, now: i64) -> Result<SessionId, PortError>;
+    async fn create(&self, principal: &str, now: i64) -> Result<SessionId, PortError>;
 
     /// Resolves a session identifier to its principal, refreshing the idle timer.
     ///

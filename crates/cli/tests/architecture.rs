@@ -17,15 +17,15 @@
 //!
 //! Three properties depend on the client *not* being able to reach inward:
 //!
-//! - **The access-control boundary.** The socket's mode (`0660`) plus the peer
-//!   check is what limits who can manage the kernel. A direct call has no peer
-//!   and no mode.
-//! - **Serialization.** Per-instance locks are in-process and the agent owns them.
-//!   A client that called a use case would run under a *different* process's lock
-//!   table and could interleave with the agent's own operation.
 //! - **A single contract.** Every operation is exercised through the API, so the
 //!   API's tests cover what the CLI actually does. A second entry point would be
 //!   exercised by nothing.
+//!
+//! What the client *not* reaching inward does **not** buy is a limit on who may
+//! manage the kernel. The agent socket is mode `0666` and any local user may
+//! connect to it; the caller is authenticated by the agent's own policy, not by
+//! file permissions. The boundary this file protects is the *process* boundary —
+//! that the client cannot run a use case under its own lock table.
 //!
 //! These tests read the source tree, so a violation fails the build.
 

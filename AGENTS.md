@@ -598,25 +598,48 @@ Do not bind Mihomo's controller to `0.0.0.0` unless the deployment explicitly re
 
 ### Unix socket
 
-Treat socket filesystem permissions as part of the security model.
+Treat socket filesystem permissions as part of the security model — but note
+that the two sockets have **opposite** requirements, and conflating them is the
+mistake to avoid.
+
+**The agent socket does not rely on permissions.** It is mode `0666` and any local
+user may connect; being able to connect *is* being an operator. The trade is
+deliberate: the client is meant to work without anyone being added to a dedicated
+group. On a multi-user host that means every local user can manage the kernel, so
+a deployment that cares must narrow it — either the socket mode or a peer check.
+
+**The kernel socket does rely on permissions**, and must keep doing so. Mihomo does
+not verify its `secret` over a unix socket, so `mihomo.sock` is `0660` and its
+directory denies write to others. This is the reason the shared runtime directory
+is `0751` rather than `0750`: traversable, so a local client can reach the
+authenticated agent socket, but not writable, so no one can replace the kernel's.
 
 ### Web authentication
 
 Two transports, two mechanisms, and one rule they share: **a failure to verify is
 a refusal, never a pass.**
 
-**Unix socket.** The socket's file permissions are the boundary (`0660`, inside a
-`0750` directory). The peer credential (`SO_PEERCRED`) is a *second* check and is
-off by default — deliberately, because LXC uid mapping can make a correct peer
-look wrong, and a check that locks an operator out of their own agent is worse
-than the risk it addresses. When a deployment does configure a uid or gid, a read
-failure is a refusal: allowing it would make the check bypassable by breaking the
-read.
+**Unix socket.** Any local user reaches it (mode `0666`); the agent does not treat
+the file permissions as the boundary. The peer credential (`SO_PEERCRED`) is an
+*optional additional* check and is off by default — deliberately, because LXC uid
+mapping can make a correct peer look wrong, and a check that locks an operator out
+of their own agent is worse than the risk it addresses. When a deployment does
+configure a uid or gid, a read failure is a refusal: allowing it would make the
+check bypassable by breaking the read.
 
 **TCP.** Over a network the token *is* the identity. A token is required, with
 **no loopback exemption** — loopback is not a trust boundary on a host that also
 runs untrusted software. Both transports serve at once; configuring a bind adds a
 listener, it does not replace the socket.
+
+**There is no role.** Authentication is the only authorization dimension: every
+caller that gets past it may do everything this interface offers. There was once an
+`Admin`/`ReadOnly` split, removed because it could only be enforced on the TCP path
+— the socket admits any local user by design — while no shipped client ever used
+the narrower level. A model enforced on one of two transports is worse than none,
+because it reads like a boundary that is not there. What survives of it is a
+**method** gate on `/clash-api` (`GET`/`HEAD`/`OPTIONS` only), which guards against
+a page triggering a kernel config replacement, not against a caller's identity.
 
 **Browsers get a session cookie, not a token.** A page cannot safely hold a token:
 whatever a page holds is readable by any script running on it, and this interface
@@ -953,10 +976,13 @@ relay, and the controller stays on its socket.
 
 Two rules that must not be relaxed:
 
-1. **Authorization is per method.** `GET`, `HEAD`, and `OPTIONS` serve a
-   read-only session; every other method requires an administrator. Verified
-   against upstream's API usage: every write it makes is a `PUT` or `POST`, and
-   no `GET` changes kernel state. An unrecognised method is treated as a write.
+1. **Authorization is per method, not per caller.** `GET`, `HEAD`, and `OPTIONS`
+   are relayed; every other method is refused with `403`. There is no privileged
+   caller to allow — see "Web authentication" — so the gate is the method itself.
+   It exists because a browser page must not be able to reach `PUT /configs`,
+   which replaces the running configuration. Verified against upstream's API
+   usage: every write it makes is a `PUT` or `POST`, and no `GET` changes kernel
+   state. An unrecognised method is treated as a write.
 2. **The real secret must never be disclosed to a page.** The generated
    `config.js` sets `defaultBackendURL` and nothing else — in particular no
    `controlToken`, which is how upstream's own server leaks its agent token into
@@ -1144,7 +1170,7 @@ real kernel, and worth repeating before a release:
 /clash-api/version      relays to the kernel
 /clash-api/{traffic,connections,memory,logs}   all four upgrade to 101
 /api/control/info       404, so upstream hides its control pages
-read-only session       GET and WebSocket allowed, PUT and POST refused with 403
+method gate             GET and WebSocket allowed, PUT and POST refused with 403
 ```
 
 ---

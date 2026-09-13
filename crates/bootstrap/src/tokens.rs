@@ -13,7 +13,7 @@
 //! the database itself — would have put a storage adapter behind the same crate
 //! that the architecture test forbids it to reach.
 
-use proxy_application::ports::secret_store::{PrincipalSummary, Role};
+use proxy_application::ports::secret_store::PrincipalSummary;
 
 use crate::{Bootstrap, BootstrapError, RuntimeConfig};
 
@@ -45,9 +45,9 @@ impl SqliteSecretStore {
     /// # Errors
     ///
     /// Returns the storage error from the underlying store.
-    pub async fn issue(&self, principal: &str, role: Role) -> Result<String, BootstrapError> {
+    pub async fn issue(&self, principal: &str) -> Result<String, BootstrapError> {
         self.inner
-            .issue_api_token(principal, role)
+            .issue_api_token(principal)
             .await
             .map_err(|e| BootstrapError::Secret(e.to_string()))
     }

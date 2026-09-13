@@ -107,6 +107,10 @@ pub async fn relay_upgrade<B>(
 where
     B: Send + 'static,
 {
+    // The caller was resolved before this ran, which is the authentication step for
+    // an upgrade — the router's extractor never runs on it. No authorization check
+    // follows, because the interface has no privilege levels.
+    let _ = caller;
     let Some(upstream) = state.clash_upstream.clone() else {
         return refuse(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -115,20 +119,15 @@ where
         );
     };
 
-    // A stream is a read. The dashboard's traffic, connections, and logs pages are
-    // all watches, so a read-only session may open them — which is what read-only
-    // means everywhere else in this interface, and matches those pages being
-    // visible at all.
-    //
-    // The call is written as a check rather than an assumption so that a future
-    // non-`GET` upgrade is caught here instead of silently granted.
-    if caller.role != proxy_application::ports::secret_store::Role::Admin
-        && !super::routes::clash_api::is_read_only(&axum::http::Method::GET)
-    {
+    // An upgrade is a read, and every path that reaches here has already been
+    // authenticated. The check that remains is that the *method* is one a stream
+    // may use — asserted rather than assumed, so a future non-`GET` upgrade is
+    // caught here instead of being forwarded to the kernel as a write.
+    if !super::routes::clash_api::is_read_only(&axum::http::Method::GET) {
         return refuse(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
-            "a read-only session may not open this stream",
+            "this stream may only be opened with a read-only method",
         );
     }
 

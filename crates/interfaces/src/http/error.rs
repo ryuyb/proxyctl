@@ -150,7 +150,9 @@ impl From<AuthError> for HttpError {
             // A recognised caller that is not allowed is a different answer, and
             // so is a refusal for crossing origins: the credential may be
             // perfectly valid, which is what makes the distinction worth keeping.
-            AuthError::NotPermitted { .. } | AuthError::CrossOrigin => StatusCode::FORBIDDEN,
+            AuthError::NotPermitted { .. }
+            | AuthError::MethodNotAllowed
+            | AuthError::CrossOrigin => StatusCode::FORBIDDEN,
         };
         Self {
             status,
@@ -342,6 +344,12 @@ mod tests {
         );
         assert_eq!(
             HttpError::from(AuthError::NotPermitted { uid: 1, gid: 2 }).status(),
+            StatusCode::FORBIDDEN
+        );
+        // The method gate is a 403 too, but for a different reason: the caller is
+        // fine, the request is not.
+        assert_eq!(
+            HttpError::from(AuthError::MethodNotAllowed).status(),
             StatusCode::FORBIDDEN
         );
         // A store that cannot be reached must not read as permission granted.
