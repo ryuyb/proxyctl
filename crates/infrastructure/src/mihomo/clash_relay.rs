@@ -30,7 +30,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Request, StatusCode, header};
 use proxy_application::ports::PortError;
-use proxy_application::ports::clash_proxy::{ProxyRequest, ProxyResponse, UpstreamTarget};
+use proxy_application::ports::clash_proxy::{
+    ProxyRequest, ProxyResponse, UpgradeHandshake, UpstreamTarget,
+};
 
 /// How long a relayed request may take.
 ///
@@ -324,6 +326,145 @@ impl UpstreamTarget for ClashRelay {
         })
     }
 
+    /// Opens a WebSocket to the kernel.
+    ///
+    /// # Why this sends a hand-rolled request rather than using a WebSocket client
+    ///
+    /// The relay does not need to *speak* WebSocket — it moves bytes. What it needs
+    /// is a connection hyper has upgraded, so the socket underneath can be taken
+    /// and handed to a pump.
+    ///
+    /// A `tokio-tungstenite` client would mean decoding and re-encoding every
+    /// frame, which is a protocol implementation on a path between two ends that
+    /// already agree with each other. It would also own the key: the browser's
+    /// `sec-websocket-key` is what the kernel derives its `accept` from, and the
+    /// browser verifies that value, so a client that minted its own would produce
+    /// a handshake the browser rejects.
+    async fn upgrade(
+        &self,
+        path: String,
+        query: Option<String>,
+        handshake: Vec<(String, String)>,
+    ) -> Result<UpgradeHandshake, PortError> {
+        let conn = self.endpoint.connect().await?;
+        let io = hyper_util::rt::TokioIo::new(conn);
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| PortError::Transport(format!("handshake failed: {e}")))?;
+
+        // The connection must be driven for the upgrade to complete, and
+        // `with_upgrades` keeps it alive *after* the `101` so the socket can be
+        // handed back. A plain `connection.await` resolves the moment the
+        // handshake finishes and would drop the socket with it.
+        let driver = tokio::spawn(async move {
+            let _ = connection.with_upgrades().await;
+        });
+
+        let target = match query {
+            Some(query) => format!("{path}?{query}"),
+            None => path,
+        };
+
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(target.as_str())
+            .header(header::HOST, UPSTREAM_HOST)
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::UPGRADE, "websocket");
+
+        // The browser's own handshake headers, forwarded verbatim.
+        //
+        // `sec-websocket-key` in particular must be the browser's, not one of ours.
+        // The kernel derives `sec-websocket-accept` from the key it receives, and
+        // the browser verifies that value against the key it sent — so a relay that
+        // substituted its own key would produce an `accept` every browser rejects,
+        // with `Incorrect 'Sec-WebSocket-Accept' header value`.
+        //
+        // That is exactly what this did first, having reasoned that the key only
+        // had to be well-formed. It does have to be well-formed, but it also has to
+        // be *the same one*, which is the part the reasoning missed.
+        let mut has_version = false;
+        for (name, value) in &handshake {
+            if name.eq_ignore_ascii_case("sec-websocket-version") {
+                has_version = true;
+            }
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        // Some clients omit the version; the kernel requires it.
+        if !has_version {
+            builder = builder.header("sec-websocket-version", "13");
+        }
+
+        if let Some(secret) = &self.secret {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {secret}"));
+        }
+
+        let upstream_request = builder
+            .body(Full::<Bytes>::new(Bytes::new()))
+            .map_err(|e| PortError::InvalidResponse(format!("cannot build the upgrade: {e}")))?;
+
+        let mut response =
+            tokio::time::timeout(REQUEST_TIMEOUT, sender.send_request(upstream_request))
+                .await
+                .map_err(|_| PortError::Timeout(REQUEST_TIMEOUT))?
+                .map_err(|e| PortError::Transport(format!("the controller refused: {e}")))?;
+
+        let status = response.status();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect();
+
+        if status != StatusCode::SWITCHING_PROTOCOLS {
+            // Not an upgrade. The kernel answered, most likely with a refusal, so
+            // the reason is reported with its status rather than as "it did not
+            // upgrade" — which would hide whether the path was wrong or the secret.
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map(|b| b.to_bytes())
+                .unwrap_or_default();
+            driver.abort();
+            return Err(PortError::InvalidResponse(format!(
+                "the kernel answered {status} instead of upgrading: {}",
+                String::from_utf8_lossy(&body).trim()
+            )));
+        }
+
+        // The kernel's socket is not ready until this response has been written
+        // back to the browser, which happens after this returns. The await is
+        // therefore deferred into a future the caller drives — awaiting it here
+        // would deadlock, because nothing has been sent yet.
+        let upgraded = hyper::upgrade::on(&mut response);
+        let socket = Box::pin(async move {
+            let socket = upgraded
+                .await
+                .map_err(|e| format!("the kernel's socket could not be taken: {e}"))?;
+            let boxed: Box<dyn proxy_application::ports::clash_proxy::Duplex> =
+                Box::new(hyper_util::rt::TokioIo::new(socket));
+            Ok(boxed)
+        });
+
+        // The driver is detached rather than aborted: it owns the kernel's
+        // connection, which must outlive this call for the socket to stay open.
+        // Awaiting it here would block until the stream ended, which is the whole
+        // life of the dashboard connection.
+        tokio::spawn(driver);
+
+        Ok(UpgradeHandshake {
+            status: status.as_u16(),
+            headers,
+            socket,
+        })
+    }
+
     fn describe(&self) -> String {
         match &self.endpoint {
             Endpoint::Socket(path) => format!("unix socket {}", path.display()),
@@ -510,6 +651,68 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("authorization: bearer s3cret"),
             "the injected credential must be present: {request}"
+        );
+    }
+
+    /// The browser's `sec-websocket-key` must be forwarded, not replaced.
+    ///
+    /// This is the regression test for a defect found only in a real browser: the
+    /// relay sent a well-formed key of its own, on the reasoning that only the
+    /// *shape* mattered. The kernel then derived `sec-websocket-accept` from that
+    /// key, and the browser — verifying it against the key it had sent — rejected
+    /// the handshake with `Incorrect 'Sec-WebSocket-Accept' header value`.
+    ///
+    /// A unit test that only checked the relay returned `101` would have passed.
+    /// This asserts on the bytes the kernel receives, which is where the mistake was.
+    #[tokio::test]
+    async fn the_browsers_websocket_key_is_forwarded_unchanged() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0u8; 4096];
+            let read = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer)
+                .await
+                .unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            // Answer without upgrading: the assertion is about the request, and a
+            // real handshake would require the relay to complete one.
+            let _ = stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n")
+                .await;
+            let _ = stream.flush().await;
+            request
+        });
+
+        // A key a browser would send.
+        const BROWSER_KEY: &str = "x3JJHMbDL1EzLkh9GBhXDw==";
+        let relay = ClashRelay::new(Endpoint::Tcp(address), None);
+        let _ = relay
+            .upgrade(
+                "/traffic".to_owned(),
+                None,
+                vec![
+                    ("sec-websocket-key".to_owned(), BROWSER_KEY.to_owned()),
+                    ("sec-websocket-version".to_owned(), "13".to_owned()),
+                ],
+            )
+            .await;
+
+        let request = server.await.expect("the server task should finish");
+        assert!(
+            request.contains(BROWSER_KEY),
+            "the browser's key must reach the kernel: {request}"
+        );
+        // A fixed key must not appear. This is the specific value the first
+        // version hard-coded.
+        assert!(
+            !request.contains("dGhlIHNhbXBsZSBub25jZQ=="),
+            "the relay must not substitute its own key: {request}"
         );
     }
 

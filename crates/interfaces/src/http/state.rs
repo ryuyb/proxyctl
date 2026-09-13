@@ -57,6 +57,50 @@ impl Caller {
             role: Role::Admin,
         }
     }
+
+    /// Resolves the caller for a request that will not reach the router.
+    ///
+    /// # Why this exists rather than a second implementation of the rules
+    ///
+    /// A WebSocket upgrade is taken before axum routes it, so the extractor never
+    /// runs on its own. This calls the same [`FromRequestParts`] implementation the
+    /// router would, so there is still exactly one definition of what
+    /// authenticates a caller — the peer credential, the session cookie with its
+    /// CSRF check, and the bearer token.
+    ///
+    /// Reimplementing those here would be a second copy of the agent's entire
+    /// access-control model, and two copies drift in the direction that grants
+    /// access.
+    ///
+    /// # Errors
+    ///
+    /// Returns the extractor's own rejection as a response, rather than an error
+    /// type: it already carries the right status and body shape, and re-deriving
+    /// it here would be a second place that has to agree about what a refusal
+    /// looks like.
+    pub async fn from_request_parts_owned(
+        parts: axum::http::request::Parts,
+        state: AppState,
+    ) -> Result<Self, Box<axum::response::Response>> {
+        use axum::extract::FromRequestParts;
+        use axum::response::IntoResponse as _;
+
+        // `parts` and `state` are taken by value rather than by reference: the
+        // extractor's future must be `Send`, and a `&AppState` or `&Request` held
+        // across its await is not, because `AppState` is only `Send` when owned.
+        // Both are cheap to move — `AppState` is `Arc`s and small values, and the
+        // parts have already been cloned by the caller.
+        let mut parts = parts;
+
+        match <Self as FromRequestParts<AppState>>::from_request_parts(&mut parts, &state).await {
+            Ok(caller) => Ok(caller),
+            // Boxed: a `Response` is ~128 bytes, and this `Result` is returned
+            // through the connection loop where the success value is a small
+            // struct. An unboxed error would make every return path move the
+            // larger of the two.
+            Err(rejection) => Err(Box::new(rejection.into_response())),
+        }
+    }
 }
 
 /// State shared by every handler.

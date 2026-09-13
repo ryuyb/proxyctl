@@ -397,7 +397,16 @@ async fn serve_tcp_connection(
     // here is small.
     let _ = stream.set_nodelay(true);
 
-    let app = app.layer(axum::Extension(PeerAddress(peer)));
+    // The upgrade interceptor goes on last, so it sees the request before axum
+    // routes it. A WebSocket stream cannot be served by a handler — see
+    // `upgrade.rs` — so it has to be taken here.
+    let state_for_upgrade = state.clone();
+    let app = app
+        .layer(axum::Extension(PeerAddress(peer)))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            let state = state_for_upgrade.clone();
+            async move { intercept_upgrade(request, next, state).await }
+        }));
     let io = TokioIo::new(stream);
 
     // `.with_upgrades()` is what makes an HTTP/1.1 upgrade possible at all.
@@ -417,6 +426,54 @@ async fn serve_tcp_connection(
         let _ = e;
     }
     let _ = state;
+}
+
+/// Takes a Clash API WebSocket out of the router's hands.
+///
+/// # Why this is middleware rather than a route
+///
+/// A WebSocket stream cannot be served by a handler: an upgrade turns the
+/// connection into something that is no longer HTTP, and a handler returns a
+/// `Response` — after which hyper closes the socket that was supposed to become
+/// the stream. `hyper::upgrade::on` hands the socket back, and it needs the
+/// request, which is only available before the router consumes it.
+///
+/// # Why everything else falls through
+///
+/// Only a WebSocket upgrade under `/clash-api` is intercepted. Every other request
+/// — including an ordinary `/clash-api` request — goes to `next`, so the router
+/// remains the single place that decides what a path means.
+async fn intercept_upgrade(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+    state: AppState,
+) -> axum::response::Response {
+    if !super::upgrade::is_clash_upgrade(&request) {
+        return next.run(request).await;
+    }
+
+    // The caller is resolved here, with the same extractor every route uses, and
+    // passed on. Doing it here rather than inside the relay is what keeps the
+    // access-control logic in one place: the peer credential, the session cookie
+    // with its CSRF check, and the bearer token are all `Caller`'s, and a second
+    // implementation would drift from it in the direction that grants access.
+    //
+    // The request is split so the extractor gets the parts — which the upgrade
+    // itself needs to keep, because `hyper::upgrade::on` takes the whole request.
+    // So the parts are cloned for the extractor and the original is kept intact.
+    let mut probe = axum::http::Request::new(()).into_parts().0;
+    probe.method = request.method().clone();
+    probe.uri = request.uri().clone();
+    probe.version = request.version();
+    probe.headers = request.headers().clone();
+    probe.extensions = request.extensions().clone();
+
+    let caller = match super::state::Caller::from_request_parts_owned(probe, state.clone()).await {
+        Ok(caller) => caller,
+        Err(response) => return *response,
+    };
+
+    super::upgrade::relay_upgrade(request, &caller, &state).await
 }
 
 /// The address a TCP request came from.
@@ -444,7 +501,17 @@ async fn serve_connection(stream: UnixStream, app: axum::Router, state: AppState
 
     // The wrapper, not the bare caller: the extractor looks for `PeerCaller` so a
     // connection-bound identity cannot be confused with one derived from a token.
-    let app = app.layer(axum::Extension(super::auth::PeerCaller(caller)));
+    //
+    // The upgrade interceptor is applied here too: the dashboard is reachable over
+    // the socket, and a WebSocket opened through it would otherwise reach the
+    // router and be answered as an ordinary request.
+    let state_for_upgrade = state.clone();
+    let app = app
+        .layer(axum::Extension(super::auth::PeerCaller(caller)))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            let state = state_for_upgrade.clone();
+            async move { intercept_upgrade(request, next, state).await }
+        }));
     let io = TokioIo::new(stream);
 
     // See `serve_tcp_connection`: without this an upgrade cannot complete, and the

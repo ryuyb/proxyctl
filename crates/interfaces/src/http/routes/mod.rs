@@ -63,6 +63,15 @@ pub fn router() -> Router<AppState> {
             clash_api::CLASH_API_PREFIX,
             axum::routing::any(clash_api::proxy),
         )
+        // Registered before the dashboard's own routes, so the artifact's static
+        // `config.js` is never reached. It is loaded synchronously before the
+        // application boots and is the only channel that can set the default
+        // backend before the connect form reads it; the artifact's copy points at
+        // the kernel's own port, which a browser must not reach.
+        .route(
+            &format!("{}/config.js", assets::Bundle::Dashboard.prefix()),
+            get(control::config_js),
+        )
         .route(
             &format!("{}/{{*path}}", assets::Bundle::Dashboard.prefix()),
             get(admin::serve_dashboard),
