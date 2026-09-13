@@ -122,12 +122,17 @@ Linux + systemd，架构为 `x86_64` 或 `aarch64`。实测过的是 Debian/Ubun
 #    这条命令会按需把 agent 拉起来。
 proxyctl mihomo update v1.19.30
 
-# 2. 看看这个环境实际能做什么
+# 2. 存一份配置并激活它。内核需要有东西可加载，这一步会创建第一个版本。
+proxyctl config add /etc/proxy-agent/mihomo.yaml
+
+# 3. 看看这个环境实际能做什么
 proxyctl doctor
 
-# 3. 启动内核
+# 4. 启动内核
 proxyctl start
 ```
+
+`config add` 会用与 `config validate` 相同的三层验证检查文档，然后把它存成不可变版本并把 active 指针指向它。它**不会** reload，所以在内核还不存在时也能用 —— 这是首次 `start` 能有东西可加载的唯一途径。要切换**正在运行**的配置，用 `config activate`，它会 reload，并在内核拒绝时回滚。
 
 不需要 `sudo`，也不需要加入任何组：本机任何用户都能直接使用 agent。见[谁能用](#谁能用)。
 
@@ -199,8 +204,9 @@ proxyctl mihomo update v1.19.30 # 拉取、校验并安装内核发行版
 proxyctl mihomo version         # 当前已安装的版本
 
 proxyctl config list            # 全部配置版本
+proxyctl config add FILE        # 存为版本并激活
 proxyctl config validate FILE   # 预检、语法、语义
-proxyctl config activate ID
+proxyctl config activate ID     # 切换正在运行的内核，失败可回滚
 proxyctl config rollback ID     # 回退到曾经可用的版本
 
 proxyctl subscription list

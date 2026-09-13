@@ -540,6 +540,75 @@ impl Command for ConfigList {
     }
 }
 
+/// `config add` — stores a document as a new version and activates it.
+///
+/// # Why it activates
+///
+/// The point of adding a configuration is to run it. A version stored but not
+/// activated leaves the operator to run a second command, and the pair is one
+/// intention, so `add` does both. `config activate` remains for switching to a
+/// version that already exists.
+///
+/// # Why a rejected document still exits non-zero
+///
+/// The agent answers `200` because the request succeeded — the document was
+/// judged, and the answer is what the judgement was. The status therefore says
+/// nothing about the document, exactly as with `config validate`, so the exit code
+/// comes from the body. Otherwise `proxyctl config add bad.yaml && proxyctl start`
+/// would try to start a kernel that was never given a configuration.
+#[derive(Debug, Clone)]
+pub struct ConfigAdd {
+    /// The document.
+    pub body: String,
+}
+
+impl Command for ConfigAdd {
+    fn request(&self) -> Request {
+        Request::with_body(
+            "POST",
+            format!("{API_PREFIX}/configs"),
+            json!({ "body": self.body }),
+        )
+    }
+
+    fn render(&self, response: &Response) -> Result<String, Exit> {
+        let value = as_object(&response.body)?;
+        let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let active = value.get("active").and_then(|v| v.as_str()).unwrap_or("?");
+        let succeeded = value
+            .get("succeeded")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let report = value.get("report").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Both ids are shown when they differ, because that is precisely the case
+        // where an operator would otherwise believe the new document is serving.
+        if succeeded {
+            Ok(format!("stored {id} and activated it\n  active  {active}"))
+        } else {
+            Ok(format!(
+                "stored {id}, but it was rejected and {active} is still active\n  reason  {report}"
+            ))
+        }
+    }
+
+    fn exit_code(&self, response: &Response) -> Exit {
+        // A body that is not an object is a different failure, reported by
+        // `render`; only a well-formed answer can say whether the document was
+        // accepted.
+        let succeeded = serde_json::from_str::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|value| value.get("succeeded").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        if succeeded {
+            Exit::Success
+        } else {
+            Exit::Failure
+        }
+    }
+}
+
 /// `config validate` — validates a document without activating it.
 #[derive(Debug, Clone)]
 pub struct ConfigValidate {
@@ -1105,6 +1174,82 @@ mod tests {
     /// document is — so the status says nothing. This was returning `Success`
     /// regardless, which made `proxyctl config validate && proxyctl config
     /// activate` activate a rejected document: "rejected" was printed and the exit
+    /// `config add` reports success only when the document was accepted.
+    ///
+    /// The agent answers `200` either way, so the exit code has to come from the
+    /// body. Without this, `proxyctl config add bad.yaml && proxyctl start` would
+    /// try to start a kernel that was never given a configuration — the same defect
+    /// `config validate` had.
+    #[test]
+    fn adding_a_rejected_document_exits_non_zero() {
+        let command = ConfigAdd { body: "x".into() };
+
+        let accepted = ok(serde_json::json!({
+            "id": "default-001",
+            "active": "default-001",
+            "succeeded": true,
+            "report": "accepted",
+        }));
+        assert_eq!(command.exit_code(&accepted), Exit::Success);
+
+        let rejected = ok(serde_json::json!({
+            "id": "default-002",
+            "active": "default-001",
+            "succeeded": false,
+            "report": "Semantic: unknown key",
+        }));
+        assert_eq!(command.exit_code(&rejected), Exit::Failure);
+    }
+
+    /// A rejected document must name the version still serving, or an operator
+    /// reads "stored" and concludes their change is live.
+    #[test]
+    fn adding_a_rejected_document_names_what_is_still_active() {
+        let command = ConfigAdd { body: "x".into() };
+        let rejected = ok(serde_json::json!({
+            "id": "default-002",
+            "active": "default-001",
+            "succeeded": false,
+            "report": "Semantic: unknown key",
+        }));
+
+        let text = command.render(&rejected).expect("renders");
+        assert!(text.contains("default-001"), "{text}");
+        assert!(text.contains("still active"), "{text}");
+        assert!(text.contains("unknown key"), "{text}");
+    }
+
+    /// A successful add reports the version it created.
+    #[test]
+    fn adding_an_accepted_document_reports_the_version() {
+        let command = ConfigAdd { body: "x".into() };
+        let accepted = ok(serde_json::json!({
+            "id": "default-007",
+            "active": "default-007",
+            "succeeded": true,
+            "report": "accepted",
+        }));
+
+        let text = command.render(&accepted).expect("renders");
+        assert!(text.contains("default-007"), "{text}");
+        assert!(text.contains("activated"), "{text}");
+    }
+
+    /// The request must carry the document as `body`, which is the field the
+    /// endpoint reads. A rename would otherwise be a silent 400.
+    #[test]
+    fn adding_posts_the_document_as_a_body_field() {
+        let command = ConfigAdd {
+            body: "mixed-port: 7890".into(),
+        };
+        let request = command.request();
+        assert_eq!(request.method, "POST");
+        assert!(request.path.ends_with("/configs"), "{}", request.path);
+        let sent = request.body.expect("a body");
+        let document = sent.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(document, "mixed-port: 7890", "{sent}");
+    }
+
     /// code said success, so a script saw agreement.
     #[test]
     fn a_rejected_configuration_exits_non_zero() {

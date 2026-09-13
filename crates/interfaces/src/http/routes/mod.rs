@@ -114,7 +114,10 @@ pub fn router() -> Router<AppState> {
             &format!("{API_PREFIX}/mihomo/kernel"),
             get(mihomo::get_kernel).post(mihomo::update),
         )
-        .route(&format!("{API_PREFIX}/configs"), get(configs::list))
+        .route(
+            &format!("{API_PREFIX}/configs"),
+            get(configs::list).post(configs::create),
+        )
         .route(
             &format!("{API_PREFIX}/configs/validate"),
             post(configs::validate),

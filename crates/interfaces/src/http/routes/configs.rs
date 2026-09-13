@@ -4,9 +4,12 @@ use axum::Json;
 use axum::extract::{Path, State};
 use proxy_application::commands::activate_config::{ActivateConfig, ActivateConfigInput};
 use proxy_application::commands::rollback_config::{RollbackConfig, RollbackConfigInput};
+use proxy_application::commands::store_config::StoreConfig;
 use proxy_application::queries::ListConfigs;
 
-use crate::dto::{ConfigVersionDto, IdDto, ListQuery, ValidateInput, ValidationDto};
+use crate::dto::{
+    ConfigVersionDto, CreateConfigDto, IdDto, ListQuery, ValidateInput, ValidationDto,
+};
 use crate::http::error::HttpError;
 use crate::http::state::{AppState, Caller};
 
@@ -94,6 +97,72 @@ pub async fn activate(
     let output = ActivateConfig::execute(&state.ctx, input, now()).await?;
     Ok(Json(IdDto {
         id: output.active.as_str().to_owned(),
+    }))
+}
+
+/// Stores a document as a new version and makes it active.
+///
+/// # Why this exists
+///
+/// Without it a first-time deployment has no way to get a version to activate:
+/// `activate` and `rollback` both need an id, and nothing produced one. The symptom
+/// was `proxyctl start` failing with "no start options configured", which is
+/// accurate — the kernel had nothing to load — but points at the wrong remedy,
+/// because the missing piece was an earlier command that did not exist.
+///
+/// # Why it does not reload
+///
+/// It delegates to [`StoreConfig`], not [`ActivateConfig`], and the difference is
+/// the kernel. Activation assumes a running kernel to switch, and this is the path
+/// that makes a first start possible — so it must work while nothing is running.
+/// Routing it through activation failed at the reload, treated that as a rollback,
+/// and reported "stored, but rejected" for a document that was valid and stored.
+///
+/// Once a kernel is running, switching it to a new document is what `activate` is
+/// for, and that path does reload and can roll back.
+///
+/// # Errors
+///
+/// Returns `400` when the body is not usable as a document. A document that fails
+/// validation is *not* an error: the response reports it, because a configuration
+/// with a typo is the most ordinary thing an operator submits here.
+pub async fn create(
+    State(state): State<AppState>,
+    caller: Caller,
+    Json(input): Json<ValidateInput>,
+) -> Result<Json<CreateConfigDto>, HttpError> {
+    let _ = &caller;
+
+    if input.body.trim().is_empty() {
+        return Err(HttpError::bad_request(
+            "the document is empty; send the YAML body to store as a version",
+        ));
+    }
+
+    let body = proxy_domain::configuration::ConfigBody::new(input.body)
+        .map_err(|e| HttpError::bad_request(e.to_string()))?;
+
+    let candidate = proxy_domain::configuration::ConfigCandidate::new(
+        state.ctx.instance.clone(),
+        proxy_domain::configuration::ConfigSource::Manual,
+        body,
+    );
+
+    let output = StoreConfig::execute(
+        &state.ctx,
+        ActivateConfigInput::new(candidate, Vec::new()),
+        now(),
+    )
+    .await?;
+    Ok(Json(CreateConfigDto {
+        id: output.stored.as_str().to_owned(),
+        active: output
+            .active
+            .as_ref()
+            .map(|id| id.as_str().to_owned())
+            .unwrap_or_default(),
+        succeeded: output.succeeded,
+        report: output.reason.unwrap_or_else(|| "accepted".to_owned()),
     }))
 }
 

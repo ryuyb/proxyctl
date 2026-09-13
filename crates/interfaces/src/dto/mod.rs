@@ -426,6 +426,23 @@ pub struct ValidateInput {
     pub body: String,
 }
 
+/// The result of storing a document as a version.
+///
+/// Reports both the version created and which one is active: they differ when a
+/// rejected document left an earlier version serving, and a client that showed
+/// only `id` would tell an operator their new config is live when it is not.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateConfigDto {
+    /// The version the document was stored as.
+    pub id: String,
+    /// The version that is active now, which is the previous one if this failed.
+    pub active: String,
+    /// Whether the document was accepted and is now serving.
+    pub succeeded: bool,
+    /// A one-line summary of why, when it was not.
+    pub report: String,
+}
+
 /// The result of validating a document.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationDto {

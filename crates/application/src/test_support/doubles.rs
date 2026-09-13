@@ -369,6 +369,19 @@ impl ConfigRepository for ConfigStore {
         Ok(())
     }
 
+    /// A deterministic path derived from the label.
+    ///
+    /// The double has no filesystem, so this reports what the identifier *would*
+    /// map to. It must still be label-derived rather than id-derived, because the
+    /// real adapter is, and a test asserting on the path would otherwise encode a
+    /// layout the adapter does not use.
+    async fn body_path(&self, version: &ConfigVersion) -> Result<std::path::PathBuf, PortError> {
+        Ok(std::path::PathBuf::from(format!(
+            "/configs/{}.yaml",
+            version.label()
+        )))
+    }
+
     async fn read_body(&self, version: &ConfigVersion) -> Result<ConfigBody, PortError> {
         self.bodies
             .lock()

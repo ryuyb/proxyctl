@@ -16,6 +16,7 @@ pub mod activate_config;
 pub mod connections;
 pub mod lifecycle;
 pub mod rollback_config;
+pub mod store_config;
 pub mod update_subscription;
 
 pub use activate_config::{ActivateConfig, ActivateConfigInput, ActivateConfigOutput};
@@ -24,6 +25,7 @@ pub use lifecycle::{
     ReloadMihomo, RestartMihomo, StartMihomo, StartOutcome, StopMihomo, StopOutcome, signal_kernel,
 };
 pub use rollback_config::{RollbackConfig, RollbackConfigInput, RollbackConfigOutput};
+pub use store_config::{StoreConfig, StoreConfigOutput};
 pub use update_subscription::{
     SubscriptionCrud, SubscriptionTestResult, UpdateSubscription, UpdateSubscriptionInput,
     UpdateSubscriptionOutput,

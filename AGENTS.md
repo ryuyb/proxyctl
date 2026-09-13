@@ -861,6 +861,7 @@ proxyctl subscription list
 proxyctl subscription update
 
 proxyctl config list
+proxyctl config add FILE
 proxyctl config validate
 proxyctl config rollback 41
 
@@ -876,6 +877,26 @@ proxyctl status --json
 Do not print secrets by default.
 
 Exit codes must distinguish success from operational failure.
+
+**Storing a configuration is not activating one, and the difference is the
+kernel.** `config add` validates, persists, and moves the active pointer; it does
+*not* reload. That is what lets a first configuration exist at all, since there is
+no kernel to reload yet — and a start reads the active pointer to decide what to
+launch, so a stored version is immediately startable. `config activate` is the one
+that reloads a *running* kernel and rolls back if it is rejected.
+
+Routing `add` through `activate` looks like reuse and is a trap. It fails at the
+reload, treats that as a rollback, and reports "stored, but rejected" for a document
+that was valid and *had* been stored — found exactly that way, because the first
+attempt at this command delegated to activation.
+
+Because of this, launch options cannot be a snapshot taken at agent startup. An
+agent already running when the first version was stored still held `None`, so a
+start reported "no configuration is active" while `config list` showed one that was.
+`StartMihomo` re-derives the config path from the active pointer on every start and
+takes only the host-level fields (`binary_path`, `working_dir`) from the cached
+options — the application layer must not invent a configs directory layout, which is
+the adapter's decision.
 
 **A `200` can still be a failure.** `config validate` is the case: the agent
 answers `200` because the request succeeded and the answer is what the document

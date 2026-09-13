@@ -478,6 +478,10 @@ impl ConfigRepository for FileConfigRepository {
             .await
     }
 
+    async fn body_path(&self, version: &ConfigVersion) -> Result<PathBuf, PortError> {
+        Self::body_path(self, version)
+    }
+
     async fn read_body(&self, version: &ConfigVersion) -> Result<ConfigBody, PortError> {
         let path = self.body_path(version)?;
         let contents = tokio::fs::read_to_string(&path).await.map_err(|e| {

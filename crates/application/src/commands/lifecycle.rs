@@ -98,6 +98,40 @@ async fn save_instance(
     Ok(())
 }
 
+/// Builds the launch options for the active configuration.
+///
+/// # Why only the config path is re-derived
+///
+/// `StartOptions` mixes two kinds of fact. `binary_path` and `working_dir` describe
+/// *the host*: where the kernel was installed and which directory it treats as its
+/// own. Those are the adapter's business and are supplied once through the cached
+/// options. `config_path` describes *which document to run*, which is exactly what
+/// changes when a version is stored or activated.
+///
+/// So this overrides the path and leaves the rest alone. Rebuilding all three here
+/// would mean the application layer inventing a configs directory layout, which is
+/// the adapter's decision — and a second adapter would then have to match it.
+///
+/// Returns `None` when nothing is active, which is a supported state: the caller
+/// reports it rather than treating it as a fault.
+async fn options_from_active(
+    ctx: &AppContext,
+) -> Result<Option<crate::ports::process_manager::StartOptions>, ApplicationError> {
+    let Some(active) = ctx.configs.active(&ctx.instance).await? else {
+        return Ok(None);
+    };
+
+    // The template supplies the host-level fields. Without one there is no binary to
+    // launch, and the caller's own diagnostics are clearer than a guess here.
+    let Some(mut options) = ctx.start_options() else {
+        return Ok(None);
+    };
+
+    options.config_path = ctx.configs.body_path(&active).await?.display().to_string();
+
+    Ok(Some(options))
+}
+
 /// Starts the kernel.
 pub struct StartMihomo;
 
@@ -149,9 +183,30 @@ impl StartMihomo {
             )
             .await?;
 
-        let options = ctx.start_options().ok_or_else(|| {
-            ApplicationError::InvalidState("no start options configured; cannot spawn".to_owned())
-        })?;
+        // Recomputed from the active pointer rather than read from the cached
+        // options recorded at agent startup.
+        //
+        // The cache is a snapshot: an agent that was running when `config add`
+        // stored the first version still holds `None`, so a start would report "no
+        // configuration is active" while `config list` shows one that is. Found
+        // exactly that way — adding a configuration and starting immediately,
+        // without restarting the agent, could not work.
+        //
+        // The cached options are still the fallback, because a *restart* should
+        // reuse what the process was actually launched with rather than re-derive
+        // it: if an operator moved the kernel binary mid-life, restarting with the
+        // new path is a change of behaviour, not a repair.
+        let options = match options_from_active(ctx).await? {
+            Some(options) => options,
+            None => ctx.start_options().ok_or_else(|| {
+                ApplicationError::InvalidState(
+                    "no configuration is active, so there is nothing for the kernel to load. \
+                     Store one with `proxyctl config add <FILE>`, which activates it, and \
+                     then start"
+                        .to_owned(),
+                )
+            })?,
+        };
 
         // Move to Starting and persist before spawning, so a concurrent request
         // arriving now sees a start in flight rather than a stopped instance.
@@ -389,9 +444,30 @@ impl RestartMihomo {
         instance: &mut MihomoInstance,
         now: Timestamp,
     ) -> Result<StartOutcome, ApplicationError> {
-        let options = ctx.start_options().ok_or_else(|| {
-            ApplicationError::InvalidState("no start options configured; cannot spawn".to_owned())
-        })?;
+        // Recomputed from the active pointer rather than read from the cached
+        // options recorded at agent startup.
+        //
+        // The cache is a snapshot: an agent that was running when `config add`
+        // stored the first version still holds `None`, so a start would report "no
+        // configuration is active" while `config list` shows one that is. Found
+        // exactly that way — adding a configuration and starting immediately,
+        // without restarting the agent, could not work.
+        //
+        // The cached options are still the fallback, because a *restart* should
+        // reuse what the process was actually launched with rather than re-derive
+        // it: if an operator moved the kernel binary mid-life, restarting with the
+        // new path is a change of behaviour, not a repair.
+        let options = match options_from_active(ctx).await? {
+            Some(options) => options,
+            None => ctx.start_options().ok_or_else(|| {
+                ApplicationError::InvalidState(
+                    "no configuration is active, so there is nothing for the kernel to load. \
+                     Store one with `proxyctl config add <FILE>`, which activates it, and \
+                     then start"
+                        .to_owned(),
+                )
+            })?,
+        };
 
         instance.transition(MihomoStatus::STARTING)?;
         save_instance(ctx, instance).await?;

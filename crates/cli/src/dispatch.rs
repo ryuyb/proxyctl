@@ -387,6 +387,13 @@ pub fn build(top: &TopCommand) -> Option<Box<dyn Command>> {
             instance: args.instance.clone(),
             limit: args.limit,
         }),
+        TopCommand::Config(ConfigCommand::Add(args)) => match std::fs::read_to_string(&args.file) {
+            Ok(body) => Box::new(ConfigAdd { body }),
+            Err(e) => {
+                eprintln!("proxyctl: cannot read {}: {e}", args.file.display());
+                return None;
+            }
+        },
         TopCommand::Config(ConfigCommand::Validate(args)) => {
             // Reading the file here rather than in the client is what keeps the
             // client free of local file handling.

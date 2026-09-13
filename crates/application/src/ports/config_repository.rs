@@ -68,6 +68,21 @@ pub trait ConfigRepository: Send + Sync {
     /// Read a version's body back.
     async fn read_body(&self, version: &ConfigVersion) -> Result<ConfigBody, PortError>;
 
+    /// Where a version's body lives on disk.
+    ///
+    /// Needed to build the arguments a kernel is launched with, which take a path
+    /// rather than a payload. Exposed on the port because the *layout* is the
+    /// adapter's decision — the application layer must not reconstruct a filename
+    /// from a label, or every adapter would have to agree on a convention it does
+    /// not own.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError::Storage`] when the identifier cannot be turned into a
+    /// safe path — an identifier that would escape the configs directory is a
+    /// refusal, not a filename to sanitise.
+    async fn body_path(&self, version: &ConfigVersion) -> Result<std::path::PathBuf, PortError>;
+
     /// Delete versions beyond the retention limit for an instance.
     ///
     /// Implementations must never delete the active version, and must return how

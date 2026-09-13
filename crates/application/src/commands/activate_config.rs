@@ -208,30 +208,7 @@ impl ActivateConfig {
 
         // ---- Layers 0-2: static validation ---------------------------------
         advance(JobStep::Preflight);
-        let preflight_ctx = PreflightContext {
-            desired_ports: input.desired_ports.clone(),
-            requires_geodata: input.requires_geodata,
-            geodata_present: input.geodata_present,
-            online: input.online,
-        };
-        let preflight = ctx
-            .validator
-            .preflight(input.candidate.body(), &preflight_ctx)
-            .await?;
-
-        advance(JobStep::Syntax);
-        let syntax = ctx
-            .validator
-            .validate_syntax(input.candidate.body())
-            .await?;
-
-        advance(JobStep::Semantic);
-        let semantic = ctx
-            .validator
-            .validate_semantic(input.candidate.body())
-            .await?;
-
-        let report = ValidationReport::static_layers(preflight, syntax, semantic);
+        let report = validate_static(ctx, input).await?;
 
         // Record the failure before the typestate gate consumes the candidate, so
         // the caller can see which layer rejected it.
@@ -485,7 +462,16 @@ impl ActivateConfig {
     /// Restarts the kernel process.
     async fn restart_kernel(ctx: &AppContext) -> Result<(), ApplicationError> {
         let start = ctx.start_options().ok_or_else(|| {
-            ApplicationError::InvalidState("no start options configured".to_owned())
+            // Reachable during activation recovery, so the advice differs from
+            // `StartMihomo`'s: a configuration *is* being activated, which means one
+            // exists, so the missing piece is the kernel binary rather than a
+            // document to add.
+            ApplicationError::InvalidState(
+                "the kernel cannot be restarted because its binary path is not \
+                 configured. Set kernel.binary in the configuration, or install a \
+                 kernel with `proxyctl mihomo update <VERSION>`"
+                    .to_owned(),
+            )
         })?;
 
         if let Some(handle) = ctx.current_handle() {
@@ -550,4 +536,36 @@ impl ActivateConfig {
 /// and non-empty.
 fn candidate_label(candidate: &ConfigCandidate<Unvalidated>) -> String {
     format!("candidate-{}", candidate.checksum())
+}
+
+/// Runs the three static validation layers and returns their combined report.
+///
+/// Extracted so `StoreConfig` applies exactly the same gate as activation. A second
+/// copy would be a second definition of "acceptable", and the two would drift the
+/// first time a layer is added or reordered — with the divergence appearing only as
+/// a document that stores but will not activate.
+pub(crate) async fn validate_static(
+    ctx: &AppContext,
+    input: &ActivateConfigInput,
+) -> Result<ValidationReport, ApplicationError> {
+    let preflight_ctx = PreflightContext {
+        desired_ports: input.desired_ports.clone(),
+        requires_geodata: input.requires_geodata,
+        geodata_present: input.geodata_present,
+        online: input.online,
+    };
+    let preflight = ctx
+        .validator
+        .preflight(input.candidate.body(), &preflight_ctx)
+        .await?;
+    let syntax = ctx
+        .validator
+        .validate_syntax(input.candidate.body())
+        .await?;
+    let semantic = ctx
+        .validator
+        .validate_semantic(input.candidate.body())
+        .await?;
+
+    Ok(ValidationReport::static_layers(preflight, syntax, semantic))
 }

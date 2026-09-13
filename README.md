@@ -142,12 +142,23 @@ The prebuilt binary has no runtime dependencies. Building from source needs Rust
 #    agent up on demand; there is no separate step to start it.
 proxyctl mihomo update v1.19.30
 
-# 2. See what this environment can actually do
+# 2. Store a configuration and make it active. The kernel needs one to load, and
+#    this is what creates the first version.
+proxyctl config add /etc/proxy-agent/mihomo.yaml
+
+# 3. See what this environment can actually do
 proxyctl doctor
 
-# 3. Start the kernel
+# 4. Start the kernel
 proxyctl start
 ```
+
+`config add` validates the document through the same three layers as
+`config validate`, then stores it as an immutable version and points the active
+marker at it. It does not reload anything, so it works before a kernel exists —
+which is the only way the first start can have something to load. To switch a
+configuration that is already running, use `config activate`, which reloads and
+rolls back if the kernel rejects it.
 
 No `sudo` and no group membership: any local user can talk to the agent. See
 [Who can use it](#who-can-use-it).
@@ -249,8 +260,9 @@ proxyctl mihomo update v1.19.30 # fetch, verify and install a kernel release
 proxyctl mihomo version         # what is installed now
 
 proxyctl config list            # every configuration version
+proxyctl config add FILE        # store as a version and make it active
 proxyctl config validate FILE   # preflight, syntax, semantic
-proxyctl config activate ID
+proxyctl config activate ID     # switch a running kernel, with rollback
 proxyctl config rollback ID     # back to a version that worked
 
 proxyctl subscription list

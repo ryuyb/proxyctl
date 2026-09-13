@@ -252,6 +252,11 @@ pub struct KernelUpdateArgs {
 pub enum ConfigCommand {
     /// List configuration versions.
     List(ListArgs),
+    /// Store a document as a new version and activate it.
+    ///
+    /// The command that makes `proxyctl start` possible: a start needs an active
+    /// configuration, and this is how the first one gets there.
+    Add(AddArgs),
     /// Validate a document without activating it.
     Validate(ValidateArgs),
     /// Activate a version.
@@ -278,6 +283,14 @@ pub struct ListArgs {
     /// How many to request.
     #[arg(long, default_value_t = 50)]
     pub limit: u32,
+}
+
+/// A document to store and activate.
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    /// The file to store. `-` reads standard input.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
 }
 
 /// A document to validate.
