@@ -5,12 +5,14 @@
 //! different transport belongs in the application layer, and this file's job is
 //! to name the endpoint and shape the response.
 
+pub mod admin;
 pub mod configs;
 pub mod connections;
 pub mod events;
 pub mod jobs;
 pub mod logs;
 pub mod mihomo;
+pub mod session;
 pub mod subscriptions;
 pub mod system;
 
@@ -28,6 +30,12 @@ pub const API_PREFIX: &str = "/api/v1";
 /// Builds the router.
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            &format!("{API_PREFIX}/session"),
+            get(session::current)
+                .post(session::sign_in)
+                .delete(session::sign_out),
+        )
         .route(&format!("{API_PREFIX}/system"), get(system::get_system))
         .route(&format!("{API_PREFIX}/health"), get(system::get_health))
         .route(&format!("{API_PREFIX}/doctor"), get(system::get_doctor))
@@ -93,4 +101,8 @@ pub fn router() -> Router<AppState> {
         // predates the versioning scheme. `/ws/v1/events` is itself versioned, so
         // it keeps its own shape rather than gaining a second prefix.
         .route("/ws/v1/events", get(events::stream))
+        // The admin interface, and last: `fallback` runs only when nothing above
+        // matched, so an API path can never be shadowed by the interface's
+        // single-page routes.
+        .fallback(admin::serve)
 }

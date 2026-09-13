@@ -132,6 +132,10 @@ async fn environment_probe_failure_is_reported() {
         fn services(&self) -> Arc<dyn proxy_application::ports::ServiceManager> {
             Arc::new(proxy_application::test_support::FakeServiceManager)
         }
+        fn sessions(&self) -> Arc<dyn proxy_application::ports::SessionStore> {
+            Arc::new(proxy_application::test_support::FakeSessionStore::default())
+        }
+
         fn secrets(&self) -> Arc<dyn proxy_application::ports::SecretStore> {
             Arc::new(proxy_application::test_support::FakeSecretStore::default())
         }
