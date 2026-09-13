@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use proxy_application::AppContext;
+use proxy_application::ports::clash_proxy::UpstreamTarget;
 use proxy_application::ports::secret_store::Role;
 
 /// What access-control configuration the listener uses.
@@ -86,6 +87,12 @@ pub struct AppState {
     /// the connection, because TLS is terminated by a reverse proxy in front of
     /// this listener — the connection here is plain HTTP either way.
     pub behind_tls: bool,
+    /// Where the Clash API proxy relays to, when one is wired.
+    ///
+    /// `None` means no kernel controller was configured. The proxy reports that as
+    /// unavailability rather than failing obscurely, because "the dashboard is
+    /// deployed but has nothing to talk to" is a configuration answer.
+    pub clash_upstream: Option<Arc<dyn UpstreamTarget>>,
 }
 
 impl AppState {
@@ -98,6 +105,7 @@ impl AppState {
             events: None,
             cors_origins: Vec::new(),
             behind_tls: false,
+            clash_upstream: None,
         }
     }
 
@@ -114,7 +122,20 @@ impl AppState {
             events: Some(events),
             cors_origins: Vec::new(),
             behind_tls: false,
+            clash_upstream: None,
         }
+    }
+
+    /// Attaches the Clash API relay.
+    ///
+    /// A builder rather than another constructor argument: the relay is optional
+    /// and independent of the event source, so a variant per combination would
+    /// multiply — and composition sets these one at a time as it determines what
+    /// the deployment has.
+    #[must_use]
+    pub fn with_clash_upstream(mut self, upstream: Arc<dyn UpstreamTarget>) -> Self {
+        self.clash_upstream = Some(upstream);
+        self
     }
 }
 

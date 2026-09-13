@@ -400,8 +400,17 @@ async fn serve_tcp_connection(
     let app = app.layer(axum::Extension(PeerAddress(peer)));
     let io = TokioIo::new(stream);
 
+    // `.with_upgrades()` is what makes an HTTP/1.1 upgrade possible at all.
+    // Without it hyper answers a `101 Switching Protocols` and then drops the
+    // connection, and `hyper::upgrade::on` never resolves — the failure upstream
+    // nitro hit, where HTTP works and the WebSocket is silently dead.
+    //
+    // The Clash API proxy relays the kernel's event sockets through here, so
+    // without this call the dashboard's traffic, connections, and logs pages
+    // would each appear broken in a way that looks like a kernel problem.
     if let Err(e) = hyper::server::conn::http1::Builder::new()
         .serve_connection(io, hyper_util::service::TowerToHyperService::new(app))
+        .with_upgrades()
         .await
     {
         // A client disconnecting mid-response is not worth surfacing.
@@ -438,8 +447,11 @@ async fn serve_connection(stream: UnixStream, app: axum::Router, state: AppState
     let app = app.layer(axum::Extension(super::auth::PeerCaller(caller)));
     let io = TokioIo::new(stream);
 
+    // See `serve_tcp_connection`: without this an upgrade cannot complete, and the
+    // socket transport serves the same Clash API proxy as the TCP one.
     if let Err(e) = hyper::server::conn::http1::Builder::new()
         .serve_connection(io, hyper_util::service::TowerToHyperService::new(app))
+        .with_upgrades()
         .await
     {
         // A client that disconnects mid-response is not an error worth surfacing;

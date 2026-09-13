@@ -11,6 +11,7 @@
 
 pub mod audit_sink;
 pub mod capability_probe;
+pub mod clash_proxy;
 pub mod config_repository;
 pub mod config_validator;
 pub mod error;

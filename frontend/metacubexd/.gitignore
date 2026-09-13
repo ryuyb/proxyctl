@@ -1,0 +1,16 @@
+# The fetched dashboard artifact.
+#
+# 160 files and 8 MB, produced by upstream's own release workflow. Committing it
+# would put hashed filenames in every diff, make the repository's size a function
+# of someone else's release cadence, and leave no way to tell which version a
+# checkout carries except by reading it back out of the bundle.
+#
+# `scripts/fetch-metacubexd.sh` reproduces it. `UPSTREAM_VERSION` *is* tracked, so
+# a checkout states which version it expects and an upgrade shows up as a
+# one-line change. `cargo build` works without the artifact and serves a
+# placeholder page explaining how to fetch it.
+dist/
+
+# Per-fetch detail — file count, size, source URL. Useful next to the artifact,
+# meaningless without it.
+artifact.toml

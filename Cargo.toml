@@ -26,6 +26,9 @@ futures-core = "0.3"
 # The byte buffer type in reqwest's streaming API. Naming it is required to write
 # the stream's type out; reqwest does not re-export it.
 bytes = "1"
+# The response type `hyper` produces, collected into memory by the Clash API
+# relay. It is the interface between hyper's body trait and a `Vec<u8>`.
+http-body-util = "0.1"
 # `StreamExt::next` for the HTTP transport's stream loop. `futures-core` holds the
 # traits only; the combinators live here. Already in the tree as a dependency of
 # `async-stream`, so naming it adds no new code.
@@ -53,8 +56,16 @@ nix = { version = "0.30", default-features = false }
 # `tokio` is required for streaming bodies: the log endpoint holds the connection
 # open, and without it a `Body::from_stream` is unavailable.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "service"] }
+# `client` is for the Clash API proxy: it forwards to the kernel's controller and
+# must relay an HTTP/1.1 upgrade, which `hyper::client::conn` exposes and no
+# pooled client does. `http1` stays for the same reason — an upgrade exists only
+# in HTTP/1.1.
+hyper = { version = "1", features = ["server", "client", "http1"] }
+# `client` + `client-legacy` provide `hyper::client::conn::http1::handshake`: a
+# client that hands back the *connection*, which is the requirement for relaying
+# an upgrade. A pooled client cannot do it, because it keeps the socket and
+# returns only a response.
+hyper-util = { version = "0.1", features = ["tokio", "service", "client", "client-legacy"] }
 # Metadata storage. `bundled` compiles SQLite in rather than linking a system
 # library, so the agent does not depend on the distribution's sqlite version.
 rusqlite = { version = "0.40", default-features = false }

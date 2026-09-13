@@ -22,6 +22,13 @@ async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
+# The Clash API relay. `reqwest` is the right client everywhere else in this
+# crate, but it cannot relay a protocol upgrade: it owns the connection pool and
+# hands back only a response, with no route to the socket underneath. `hyper`'s
+# lower-level client returns the connection, which is what an upgrade needs.
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
 tokio = { workspace = true, features = ["sync", "net", "time", "fs", "io-util", "process"] }
 http = { workspace = true }
 futures-core = { workspace = true }

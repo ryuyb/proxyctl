@@ -49,6 +49,26 @@ pub use real_factory::RealFactory;
 /// decision — which transport, on which path, with which access policy — rather
 /// than something the application or the adapter should decide.
 ///
+/// Maps the configured controller endpoint onto the relay's own type.
+///
+/// The two enums are deliberately separate: the config type describes what a
+/// deployment *may* say, and refuses a remote address at parse time. The relay's
+/// type describes what it can actually connect to. Keeping them apart means the
+/// relay can accept an endpoint a test hands it without the config type having to
+/// relax its own rules.
+fn relay_endpoint(
+    endpoint: &config::ControllerEndpoint,
+) -> proxy_infrastructure::mihomo::ControllerEndpoint {
+    match endpoint {
+        config::ControllerEndpoint::UnixSocket(path) => {
+            proxy_infrastructure::mihomo::ControllerEndpoint::Socket(std::path::PathBuf::from(path))
+        }
+        config::ControllerEndpoint::Loopback { address } => {
+            proxy_infrastructure::mihomo::ControllerEndpoint::Tcp(address.clone())
+        }
+    }
+}
+
 /// # Errors
 ///
 /// Returns [`BootstrapError::InvalidConfig`] when the socket path is unusable.
@@ -100,10 +120,25 @@ pub fn build_http_server(
         },
     };
 
-    let state = match events {
+    let mut state = match events {
         Some(events) => AppState::with_events(context, policy, events),
         None => AppState::new(context, policy),
     };
+
+    // The dashboard's data path. Wired whenever a controller endpoint is
+    // configured — which is always, in a real deployment — so the relay's absence
+    // is a deliberate composition choice rather than an oversight.
+    //
+    // The secret is passed through unchanged: over a unix socket there is none and
+    // none is needed, because the socket's permissions are the boundary. Over
+    // loopback the kernel requires one, and it is injected by the relay so the
+    // browser never holds it.
+    state = state.with_clash_upstream(std::sync::Arc::new(
+        proxy_infrastructure::mihomo::ClashRelay::new(
+            relay_endpoint(&config.controller),
+            config.mihomo_secret.clone(),
+        ),
+    ));
     // The socket path is passed even for a port-only configuration, because the
     // socket is always served alongside the port.
     Ok(proxy_interfaces::http::HttpServer::with_listener(

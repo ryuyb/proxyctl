@@ -6,8 +6,10 @@
 //! to name the endpoint and shape the response.
 
 pub mod admin;
+pub mod clash_api;
 pub mod configs;
 pub mod connections;
+pub mod control;
 pub mod events;
 pub mod jobs;
 pub mod logs;
@@ -19,6 +21,7 @@ pub mod system;
 use axum::Router;
 use axum::routing::{delete, get, post};
 
+use super::assets;
 use super::state::AppState;
 
 /// The API version prefix.
@@ -30,6 +33,53 @@ pub const API_PREFIX: &str = "/api/v1";
 /// Builds the router.
 pub fn router() -> Router<AppState> {
     Router::new()
+        // The dashboard and its data feed. Registered before everything else so
+        // `/ui/...` can never be reached by the single-page fallback, which is the
+        // admin interface and would answer a dashboard asset with its own HTML.
+        //
+        // `/api/control` is outside `API_PREFIX` on purpose: it is upstream's
+        // namespace, not ours, and the dashboard probes it at the origin root.
+        .route(
+            &format!("{}/{{*path}}", control::CONTROL_PREFIX),
+            axum::routing::any(control::absent),
+        )
+        // See the dashboard's routes below for why the trailing slash needs its
+        // own registration: `{*path}` will not match an empty tail, and the
+        // fallback would answer with the admin interface instead.
+        .route(
+            &format!("{}/", control::CONTROL_PREFIX),
+            axum::routing::any(control::absent),
+        )
+        .route(control::CONTROL_PREFIX, axum::routing::any(control::absent))
+        .route(
+            &format!("{}/{{*path}}", clash_api::CLASH_API_PREFIX),
+            axum::routing::any(clash_api::proxy),
+        )
+        .route(
+            &format!("{}/", clash_api::CLASH_API_PREFIX),
+            axum::routing::any(clash_api::proxy),
+        )
+        .route(
+            clash_api::CLASH_API_PREFIX,
+            axum::routing::any(clash_api::proxy),
+        )
+        .route(
+            &format!("{}/{{*path}}", assets::Bundle::Dashboard.prefix()),
+            get(admin::serve_dashboard),
+        )
+        // The prefix with a trailing slash, registered separately because axum's
+        // `{*path}` wildcard requires at least one character: `/ui/` has nothing
+        // after the slash, so it would miss the pattern above and reach the
+        // single-page fallback — which answers with the *admin* interface. The
+        // symptom is the wrong application appearing at the right URL.
+        .route(
+            &format!("{}/", assets::Bundle::Dashboard.prefix()),
+            get(admin::serve_dashboard),
+        )
+        .route(
+            assets::Bundle::Dashboard.prefix(),
+            get(admin::serve_dashboard),
+        )
         .route(
             &format!("{API_PREFIX}/session"),
             get(session::current)
