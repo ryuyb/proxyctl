@@ -942,7 +942,11 @@ ADR-001, so it is reused as a built artifact.
 
 A `cargo build` without the artifact succeeds and serves a placeholder page naming
 the script. `frontend/metacubexd/UPSTREAM_VERSION` records the tag in use and *is*
-committed, so a checkout states which version it expects.
+committed, so a checkout states which version it expects **and the script reads it
+as the default**. That is why the fetch is reproducible and why CI needs no API
+call: an unauthenticated lookup is rate-limited per source address, a runner
+shares one, and resolving "latest" per build would let two builds of the same
+commit embed different dashboards. `--latest` is the explicit way to move the pin.
 
 ### `/api/control` must stay a 404
 
