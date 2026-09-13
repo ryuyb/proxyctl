@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-application"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-bootstrap"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1119,14 +1119,14 @@ dependencies = [
 
 [[package]]
 name = "proxy-domain"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "proxy-infrastructure"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-interfaces"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1177,14 +1177,14 @@ dependencies = [
 
 [[package]]
 name = "proxy-sys"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "proxyctl"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "clap",
