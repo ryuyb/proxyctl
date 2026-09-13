@@ -24,6 +24,7 @@ pub mod mihomo_observer;
 pub mod process_manager;
 pub mod secret_store;
 pub mod service_manager;
+pub mod session_store;
 pub mod subscription_converter;
 pub mod subscription_repository;
 pub mod types;
@@ -47,6 +48,7 @@ pub use process_manager::{
 };
 pub use secret_store::{Principal, Role, SecretStore};
 pub use service_manager::ServiceManager;
+pub use session_store::{SessionId, SessionPolicy, SessionStore};
 pub use subscription_converter::{ConvertRequest, SubscriptionConverter};
 pub use subscription_repository::SubscriptionRepository;
 pub use types::{

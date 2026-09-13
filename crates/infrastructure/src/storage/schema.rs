@@ -25,7 +25,8 @@ use super::storage_err;
 ///
 /// Version 2 added the configuration, subscription, and credential tables.
 /// Version 3 stores API tokens as salted hashes rather than plaintext.
-pub const SCHEMA_VERSION: i64 = 3;
+/// Version 4 adds web sessions.
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Creates every table this build needs.
 ///
@@ -176,6 +177,30 @@ CREATE TABLE IF NOT EXISTS secrets (
     value           TEXT NOT NULL,
     created_at      INTEGER NOT NULL
 );
+
+-- Browser sessions for the web interface.
+--
+-- Separate from `api_principals` because the two have different lifetimes and
+-- different revocation stories. An API token is a long-lived credential for a
+-- script or a CLI; a session is a short-lived one for a browser, revoked by
+-- logging out. Rotating a token must not sign anyone out, and signing out must
+-- not disable a script.
+--
+-- The identifier is stored hashed for the same reason as a token: this table is
+-- what an attacker with a database copy would use to impersonate a logged-in
+-- user, and reading it must not be the same thing as holding the sessions.
+CREATE TABLE IF NOT EXISTS sessions (
+    id_hash         TEXT PRIMARY KEY NOT NULL,
+    principal       TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    last_seen_at    INTEGER NOT NULL
+);
+
+-- Expired sessions are deleted opportunistically on every read rather than by a
+-- background task, so a deployment with no traffic still converges without a
+-- scheduler. The index makes that sweep cheap.
+CREATE INDEX IF NOT EXISTS sessions_last_seen ON sessions (last_seen_at);
 
 -- API tokens are stored as a salted hash, never in plaintext.
 --
