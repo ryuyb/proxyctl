@@ -24,6 +24,18 @@
 # mismatch would mean the branch moved between the tag lookup and the download,
 # and a silent mismatch is worse than a failed build.
 #
+# # Which version is fetched
+#
+# `frontend/metacubexd/UPSTREAM_VERSION` is committed, so it is the default and
+# the source of truth: a checkout builds against the version it recorded, and CI
+# needs no network round trip to decide what to download. `--version` overrides
+# it for a one-off, and `--latest` asks upstream for the newest release.
+#
+# The distinction matters for reproducibility. Resolving "latest" on every run
+# means two builds of the same commit can embed different dashboards, and that a
+# GitHub API rate limit — which is per source address, and a CI runner shares
+# one — turns into a failed build rather than a pinned one.
+#
 # # Failure behaviour
 #
 # A missing dashboard is not a build failure. The agent serves a "not deployed"
@@ -33,9 +45,10 @@
 # what a release build should do.
 #
 # Usage:
-#   scripts/fetch-metacubexd.sh              # tolerate failure, warn
+#   scripts/fetch-metacubexd.sh              # the committed version; warn on failure
 #   scripts/fetch-metacubexd.sh --strict     # fail if the artifact is missing
 #   scripts/fetch-metacubexd.sh --version v1.273.1
+#   scripts/fetch-metacubexd.sh --latest     # resolve the newest upstream release
 
 set -euo pipefail
 
@@ -46,9 +59,11 @@ METADATA="frontend/metacubexd/artifact.toml"
 
 STRICT=0
 VERSION=""
+LATEST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --strict) STRICT=1 ;;
+    --latest) LATEST=1 ;;
     --version)
       shift
       VERSION="${1:-}"
@@ -88,15 +103,79 @@ die_or_warn() {
   exit 0
 }
 
-# Resolves the tag to fetch. An explicit `--version` wins, so a release can pin
-# one. Otherwise the latest release is used, which is the right default for a
-# development checkout: the dashboard is a view over the kernel's API, and a
-# recent version is what matches the kernel's current behaviour.
-if [ -z "$VERSION" ]; then
-  VERSION="$(curl -sSL --max-time 30 \
+# Resolves the tag to fetch, in order of precedence: `--version`, then the
+# committed `UPSTREAM_VERSION`, then `--latest` (which is the only path that
+# touches the network). Without `--latest` this is a pure download of a pinned
+# tag, so the same commit always embeds the same dashboard.
+#
+# # Why this asks for the HTTP status separately
+#
+# It used to pipe `curl -sSL` straight into `sed`, with `|| true` on the end, and
+# that combination failed in CI while passing locally. The unauthenticated GitHub
+# API rate-limits by source address, and a runner is a shared address: the answer
+# becomes `403` with a JSON *error* body, which has no `tag_name`, so `sed`
+# produced an empty string. `|| true` then swallowed the failure, `--max-time`
+# never fired, and the script reported "could not determine an upstream version"
+# — a message about a missing version rather than about being rate-limited.
+#
+# So the status is asked for explicitly and checked: a non-2xx answer is retried
+# (a rate limit is temporary), and `latest` is allowed to have no *non-prerelease*
+# release by falling back to the newest one of any kind.
+api_get() {
+  curl -sS --max-time 30 --retry 3 --retry-delay 2 --retry-all-errors \
     -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/${REPO}/releases/latest" \
-    | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)" || true
+    -w '\n%{http_code}' "$1" 2>/dev/null
+}
+
+# The committed version, when no explicit one was given and `--latest` was not
+# asked for. Reading it here is what makes the fetch reproducible and keeps CI off
+# the network for a value already in the tree.
+if [ -z "$VERSION" ] && [ "$LATEST" -eq 0 ] && [ -s "$VERSION_FILE" ]; then
+  VERSION="$(sed -n '1{/^[[:space:]]*$/d;p;q;}' "$VERSION_FILE")"
+  [ -n "$VERSION" ] && \
+    echo "fetch-metacubexd: using the committed ${VERSION} (pass --latest to update)" >&2
+fi
+
+if [ -z "$VERSION" ] && [ "$LATEST" -eq 1 ]; then
+  # The body and the status arrive together; the code is the last line.
+  RESPONSE="$(api_get "https://api.github.com/repos/${REPO}/releases/latest")" || RESPONSE=""
+
+  if [ -n "$RESPONSE" ]; then
+    HTTP="$(printf '%s' "$RESPONSE" | tail -n 1)"
+  else
+    HTTP="000"
+  fi
+  # Everything but the status line.
+  BODY="$(printf '%s' "$RESPONSE" | sed '$d')"
+
+  if [ "$HTTP" = "200" ]; then
+    VERSION="$(printf '%s' "$BODY" \
+      | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
+  fi
+
+  # `releases/latest` skips pre-releases. If upstream's newest release is one,
+  # the endpoint 404s while a perfectly usable tag exists, so ask for the list
+  # and take the newest of any kind.
+  if [ -z "$VERSION" ]; then
+    LISTING="$(api_get "https://api.github.com/repos/${REPO}/releases?per_page=1")" || LISTING=""
+    if [ -n "$LISTING" ] && [ "$(printf '%s' "$LISTING" | tail -n 1)" = "200" ]; then
+      VERSION="$(printf '%s' "$LISTING" | sed '$d' \
+        | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
+      [ -n "$VERSION" ] && \
+        echo "fetch-metacubexd: no non-prerelease release; using ${VERSION}" >&2
+    fi
+  fi
+
+  if [ -z "$VERSION" ]; then
+    die_or_warn "could not determine an upstream version (the GitHub API answered ${HTTP}; \
+pass --version to pin one explicitly)"
+  fi
+fi
+
+# Neither the file nor `--latest` produced a version: the file is missing or empty.
+if [ -z "$VERSION" ]; then
+  die_or_warn "could not determine an upstream version (${VERSION_FILE} is missing or empty; \
+pass --version, or --latest to ask upstream)"
 fi
 
 # A pinned version may be written with or without the leading `v`; upstream tags
