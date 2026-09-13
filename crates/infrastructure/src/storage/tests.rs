@@ -176,3 +176,37 @@ async fn opening_creates_missing_parent_directories() {
     let pool = SqlitePool::open(&nested).await.expect("open nested");
     assert!(pool.path().exists());
 }
+
+/// The database is world-writable, so a second process can write it.
+///
+/// Without an explicit mode the file is created under the running process's umask
+/// — usually `0644` — and a hand-run `proxyctl agent run` as a different user opens
+/// it read-only and fails with "attempt to write a readonly database". That message
+/// names the symptom and not the cause, so the mode is asserted here instead.
+///
+/// This is a deliberate accepted risk rather than a protection: any local user can
+/// write the agent's metadata. See `AGENTS.md`, "Unix socket".
+#[cfg(unix)]
+#[tokio::test]
+async fn the_database_is_writable_by_local_users() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("metadata.sqlite");
+    let pool = SqlitePool::open(&path).await.expect("open");
+
+    let mode = std::fs::metadata(pool.path())
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        DATABASE_FILE_MODE,
+        "the database must be world-writable by decision (mode {mode:o})"
+    );
+    assert_eq!(
+        DATABASE_FILE_MODE & 0o022,
+        0o022,
+        "0644 would defeat the point"
+    );
+}

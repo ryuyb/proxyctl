@@ -68,19 +68,24 @@ async fn composition_opens_the_metadata_store() {
     );
 }
 
-/// The run directory must be traversable but not writable.
+/// The run directory is writable by any local user, by decision.
 ///
-/// Traversable because `agent.sock` is `0666` and authenticates its caller itself:
-/// a directory denying `x` to others would block the client before it could present
-/// anything. Not writable because a world-writable directory lets one local user
-/// unlink and replace another's socket, whoever owns it.
+/// # The hazard this accepts
 ///
-/// The mode is deliberately *not* the whole story for the kernel's socket, and the
-/// assertions here must not be read as protection for it: upstream hardcodes
-/// `chmod 0666` on `mihomo.sock`, so a traversable directory leaves it reachable by
-/// any local user. That is an accepted risk recorded in `AGENTS.md`.
+/// A writable runtime directory lets a local user unlink `agent.sock` and bind
+/// their own in its place, so a client runs `proxyctl status` against an impostor.
+/// That is larger than the risks the other directories carry, because those let a
+/// user act on their own behalf whereas this lets them act *as the agent*.
+///
+/// It is accepted because the packaged install ships `0777` so that a hand-run
+/// `proxyctl agent run` works as an ordinary user, and refusing it in the agent
+/// would mean its own default could not start. The seal warns instead.
+///
+/// The test asserts the mode, not a safety property, because there is no safety
+/// property left to assert here — and one claiming otherwise would be a lie that
+/// survives review.
 #[tokio::test]
-async fn the_run_directory_is_traversable_but_not_writable() {
+async fn the_run_directory_is_open_to_local_users() {
     let dir = tempfile::tempdir().expect("dir");
     compose(dir.path(), |_| {}).await;
 
@@ -91,23 +96,27 @@ async fn the_run_directory_is_traversable_but_not_writable() {
         .mode();
 
     assert_eq!(
-        mode & 0o002,
-        0,
-        "the socket directory must not be world-writable, or a local user could \
-         replace a socket (mode {mode:o})"
-    );
-    assert_eq!(
-        mode & 0o001,
-        0o001,
-        "the socket directory must stay traversable so a local client can reach \
-         the authenticated agent socket (mode {mode:o})"
+        mode & 0o777,
+        0o777,
+        "the runtime directory is world-writable by decision (mode {mode:o})"
     );
 }
 
-/// Config bodies carry credentials, so their directory must not be world
-/// readable either.
+/// The configs directory is readable and writable by any local user.
+///
+/// This is a deliberate accepted risk, not an oversight. It was refused whenever
+/// world-readable, on the grounds that config bodies carry credentials; then it
+/// became `0755`; now it is `0777`, because a hand-run `proxyctl agent run` as an
+/// ordinary user needs to create and write there.
+///
+/// What that costs is stated plainly in `AGENTS.md`: any local user can replace a
+/// stored configuration or write to the metadata database. The target deployments
+/// are single-user hosts and containers where every local user is the operator.
+/// The test asserts the mode rather than a security property, because the security
+/// property is now "none" — and a test claiming otherwise would be a lie that
+/// survives review.
 #[tokio::test]
-async fn the_configs_directory_is_not_world_accessible() {
+async fn the_configs_directory_is_open_to_local_users() {
     let dir = tempfile::tempdir().expect("dir");
     compose(dir.path(), |_| {}).await;
 
@@ -116,14 +125,23 @@ async fn the_configs_directory_is_not_world_accessible() {
         .expect("metadata")
         .permissions()
         .mode();
-    assert_eq!(mode & 0o007, 0, "mode {mode:o}");
+
+    assert_eq!(
+        mode & 0o777,
+        0o777,
+        "the configs directory is world-writable by decision, so a hand-run agent \
+         works as an ordinary user (mode {mode:o})"
+    );
 }
 
-/// A directory that already exists world-writable must be tightened, not
-/// accepted: a world-writable directory lets one local user unlink and replace
-/// another's socket.
+/// A directory that already exists world-writable is accepted, not tightened.
+///
+/// It used to be tightened, because a writable runtime directory let a local user
+/// replace the socket inside it. The packaged install now ships `0777` on purpose,
+/// so tightening it would undo the default — the seal warns instead of refusing,
+/// which is the trade recorded on `RUN_DIR_MODE`.
 #[tokio::test]
-async fn an_existing_world_writable_directory_is_tightened() {
+async fn an_existing_world_writable_directory_is_accepted() {
     let dir = tempfile::tempdir().expect("dir");
     let run_dir = dir.path().join("run");
     std::fs::create_dir_all(&run_dir).expect("mkdir");
@@ -136,9 +154,9 @@ async fn an_existing_world_writable_directory_is_tightened() {
         .permissions()
         .mode();
     assert_eq!(
-        mode & 0o002,
-        0,
-        "a pre-existing world-writable directory must be tightened (mode {mode:o})"
+        mode & 0o022,
+        0o022,
+        "a world-writable runtime directory is the shipped default (mode {mode:o})"
     );
 }
 
@@ -210,11 +228,12 @@ async fn a_loopback_controller_gets_a_generated_secret() {
 /// "its mode must be 751 ... Operation not permitted" while the directory was in
 /// fact perfectly usable.
 ///
-/// Measured on Debian: the directory arrived `root:root 0755`, which grants no
-/// write to group or other and does allow traversal, so the socket inside it can be
-/// reached and cannot be replaced.
+/// Measured on Debian: the directory arrived `root:root 0755`. That is now brought
+/// to `0777` like every other runtime directory, so the test asserts the directory it
+/// creates is accepted rather than that its incoming mode survives — the mode is set
+/// to the shipped default on every start.
 #[tokio::test]
-async fn a_root_owned_but_safe_run_directory_composes() {
+async fn a_root_owned_run_directory_composes() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().expect("dir");
@@ -233,9 +252,9 @@ async fn a_root_owned_but_safe_run_directory_composes() {
         .permissions()
         .mode();
     assert_eq!(
-        mode & 0o022,
-        0,
-        "a run directory left as 0755 must be accepted, not rejected (mode {mode:o})"
+        mode & 0o777,
+        0o777,
+        "composition brings the runtime directory to the shipped mode (mode {mode:o})"
     );
 }
 
@@ -335,8 +354,7 @@ async fn a_root_under_a_foreign_parent_composes() {
         .expect("metadata")
         .permissions()
         .mode();
-    assert_eq!(mode & 0o002, 0, "mode {mode:o}");
-    assert_eq!(mode & 0o001, 0o001, "mode {mode:o}");
+    assert_eq!(mode & 0o777, 0o777, "mode {mode:o}");
 }
 
 /// A world-accessible directory that cannot be tightened must be refused rather

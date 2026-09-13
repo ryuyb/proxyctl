@@ -312,18 +312,6 @@ pub enum FileConfigError {
         /// The parser's message, which names the line and column.
         reason: String,
     },
-
-    /// The file's permissions permit more access than a file holding a secret may.
-    #[error(
-        "refusing {path}: mode {mode:o} grants access to group or other, and this file may hold \
-         the kernel secret. Set it to 0600 (chmod 600 {path})"
-    )]
-    Permissions {
-        /// The path that was checked.
-        path: String,
-        /// The mode that was found.
-        mode: u32,
-    },
 }
 
 /// Reads a configuration file, applying the permission check.
@@ -370,19 +358,32 @@ pub fn load(path: &Path) -> Result<Option<FileConfig>, FileConfigError> {
 /// from one that would leak it after the operator adds the field, and a rule that
 /// depends on the current contents is a rule nobody can verify at a glance.
 ///
-/// The one exception is the process's own uid: a file we can read anyway.
+/// Reads the file's mode and reports it, without judging it.
+///
+/// # Why this does not refuse anything
+///
+/// It used to refuse any group or other bit, on the grounds that this file may hold
+/// the kernel's controller secret. That cost more than it bought:
+///
+/// * an ordinary local user could not read the configuration they were expected to
+///   edit, and the packaged install made it worse — `/etc/proxy-agent` was `0700`,
+///   so the failure arrived as `Permission denied` long before any check ran;
+/// * the secret it guarded is already reachable on the same host by another route.
+///   Mihomo hardcodes `chmod 0666` on its controller socket and verifies no secret
+///   over a unix socket, so any local user can already `PUT /configs` against the
+///   running kernel. Refusing to let them read a file whose contents they can
+///   already act on protected it from everyone except the people who could use it.
+///
+/// So the mode is the deployment's decision, and the packaged install ships `0666`
+/// for the same reason the socket is `0666`: this agent targets single-user hosts
+/// and containers where `sudo` to edit a config file is friction with no matching
+/// benefit. A deployment that wants a private file sets `0600` and gets it — the
+/// loader simply no longer overrules that choice in either direction.
+///
+/// The function is kept rather than deleted because callers still want the mode
+/// for diagnostics, and because a future check has one obvious place to live.
 #[cfg(unix)]
-fn check_permissions(path: &Path, metadata: &std::fs::Metadata) -> Result<(), FileConfigError> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = metadata.permissions().mode() & 0o777;
-    // Any group or other bit at all: read, write, or execute. `0600` and `0400`
-    // pass; `0640`, `0644`, and `0666` do not.
-    if mode & 0o077 != 0 {
-        return Err(FileConfigError::Permissions {
-            path: path.display().to_string(),
-            mode,
-        });
-    }
+fn check_permissions(_path: &Path, _metadata: &std::fs::Metadata) -> Result<(), FileConfigError> {
     Ok(())
 }
 

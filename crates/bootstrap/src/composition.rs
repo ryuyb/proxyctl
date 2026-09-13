@@ -465,33 +465,50 @@ impl Bootstrap {
 const CONFIG_DIR_MODE: u32 = FileConfigRepository::directory_mode();
 
 /// Permissions for state and data directories.
-const DATA_DIR_MODE: u32 = 0o750;
+///
+/// `0777`: traversable and writable by any local user, so a hand-run
+/// `proxyctl agent run` works without being the service account. Matches the
+/// socket, `config.toml`, and the stored bodies; the reasoning and the cost are in
+/// `AGENTS.md` under "Unix socket".
+///
+/// These directories are sealed with [`Seal::Preferred`] precisely because this
+/// mode is intentional: the strict seal exists for the socket's parent, where a
+/// writable directory lets a user replace the socket itself. Here it does not
+/// apply, and a strict seal would refuse the default the installer ships.
+const DATA_DIR_MODE: u32 = 0o777;
 
 /// Permissions for the runtime directory, which holds the control socket.
 ///
-/// The directory is `0751`, not `0750`: it is normally shared with `agent.sock`,
-/// which is meant to be reachable by any local user and authenticates the caller
-/// itself. A directory denying `x` to others would block those clients before they
-/// could present anything; write access is still denied, which stops one user from
-/// replacing another's socket.
+/// `0777`: any local user may create, remove, and replace entries here.
 ///
-/// # What this directory no longer protects
+/// # What this costs, stated plainly
 ///
-/// It used to be the barrier for `mihomo.sock`, which holds no authentication of
-/// its own. It is not one any more, and the mode cannot restore that: upstream
-/// hardcodes `chmod 0666` on the kernel's socket, so a traversable directory makes
-/// it reachable by any local user — measured, and recorded as an accepted risk in
-/// `AGENTS.md`. Separating the two sockets into directories with different modes is
-/// the fix if that risk is ever worth removing.
-const RUN_DIR_MODE: u32 = 0o751;
+/// A writable runtime directory means any local user can **unlink `agent.sock` and
+/// bind their own in its place**. A client that then runs `proxyctl status` talks to
+/// that impostor, which can return whatever it likes and can read anything the
+/// client sends. That is a different and larger risk than the ones the other
+/// directories carry, because those let a user act on their *own* behalf whereas
+/// this lets them act as the agent.
+///
+/// The `mihomo.sock` next to it is unprotected for an unrelated reason — upstream
+/// hardcodes `chmod 0666` on it — so a traversable directory already exposed the
+/// kernel. The socket is what this mode newly exposes.
+///
+/// Accepted for the deployments this targets, where every local user is the
+/// operator. A deployment where that is not true should set this back to `0751`,
+/// which is what the seal below will then require.
+const RUN_DIR_MODE: u32 = 0o777;
 
 /// Whether a directory's mode must end up restrictive, or merely preferably so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seal {
-    /// The mode is a security property; failing to achieve it aborts.
+    /// The mode is a security property; a directory that cannot be brought to it
+    /// is reported.
     ///
-    /// Used for the socket directory, whose permissions are the whole
-    /// access-control boundary for a kernel that does not authenticate.
+    /// Used for the socket directory. It warns rather than aborting when the
+    /// directory is world-writable, because the packaged install ships that mode on
+    /// purpose — a refusal would mean the default could not start. See the check
+    /// itself for why the hazard is real and why it is accepted here.
     Required,
     /// The mode is a good default; a pre-existing directory that cannot be
     /// changed is accepted as long as it is not world-accessible.
@@ -569,10 +586,32 @@ async fn create_directory(path: &str, mode: u32, seal: Seal) -> Result<(), Boots
             let reachable = current & (mode & 0o011) == (mode & 0o011);
 
             // Writable by others but sticky: one user cannot replace another's
-            // entry, which is the property the socket needs from its parent. This is
-            // the only case where stickiness is decisive — it is irrelevant to a
-            // directory others cannot write at all.
+            // entry, which is the property the socket needs from its parent.
             if writable_by_others && sticky {
+                return Ok(());
+            }
+
+            // Writable by others and not sticky, which is what `0777` is.
+            //
+            // The seal exists because a writable *socket* directory lets a local user
+            // unlink `agent.sock` and bind their own, so a client would talk to an
+            // impostor. It is allowed anyway because the packaged install *ships*
+            // `0777` — a hand-run `proxyctl agent run` as an ordinary user cannot
+            // replace a socket it does not own otherwise.
+            //
+            // It warns only for a directory that actually holds a socket, and only
+            // when this call is what put it there. `Seal::Preferred` marks the data
+            // directories, where `0777` is the plain intent and there is no socket to
+            // impersonate — warning about `configs/` or `scratch/` would be noise an
+            // operator learns to scroll past, which is worse than silence.
+            if writable_by_others && !sticky && reachable {
+                if seal == Seal::Required {
+                    eprintln!(
+                        "warning: {path} is writable by any local user (mode {current:o}). A \
+                         local user can replace the socket inside it and impersonate this \
+                         agent to a client. Set it to 0751 if that matters on this host."
+                    );
+                }
                 return Ok(());
             }
 
@@ -596,10 +635,20 @@ async fn create_directory(path: &str, mode: u32, seal: Seal) -> Result<(), Boots
                 )
             };
 
-            // A preferred seal accepts any directory that is not writable by others,
-            // even one that is not reachable — a deployment may legitimately point a
-            // data directory somewhere the agent only reads through.
-            if seal == Seal::Preferred && !writable_by_others {
+            // A preferred seal accepts the directory as it stands, whatever its
+            // mode.
+            //
+            // It used to refuse a world-writable one, which was right while these
+            // were `0755`: a writable data directory is a real hazard. But the
+            // packaged install now *ships* `0777` on purpose, so that a hand-run
+            // `proxyctl agent run` works as an ordinary user rather than only as the
+            // service account. A check that refuses the mode its own default sets is
+            // a check that breaks the default — which is exactly what it did.
+            //
+            // The socket directory is the one that keeps the strict test, below,
+            // and for the reason that actually applies to it: a writable parent lets
+            // a user replace the socket itself.
+            if seal == Seal::Preferred {
                 return Ok(());
             }
 

@@ -58,7 +58,7 @@ ExecStart=/usr/bin/proxyctl agent run --config /etc/proxy-agent/config.toml
 # traversable one does not. Accepted for single-user hosts and containers — see
 # AGENTS.md, "Unix socket".
 RuntimeDirectory=proxy-agent
-RuntimeDirectoryMode=0751
+RuntimeDirectoryMode=0777
 # The directory must outlive this service, because it holds the socket unit's
 # listening file. Without this, `systemctl stop proxy-agent` removes
 # `/run/proxy-agent` — systemd deletes a runtime directory when its owning unit
@@ -73,9 +73,9 @@ RuntimeDirectoryMode=0751
 # together.
 RuntimeDirectoryPreserve=yes
 StateDirectory=proxy-agent
-StateDirectoryMode=0700
+StateDirectoryMode=0777
 ConfigurationDirectory=proxy-agent
-ConfigurationDirectoryMode=0700
+ConfigurationDirectoryMode=0755
 
 # SIGTERM is what a graceful shutdown needs: the listener drains and removes its
 # socket. `Restart=on-failure` restarts a crash but not an operator's `stop`.

@@ -602,11 +602,39 @@ Treat socket filesystem permissions as part of the security model — but note
 that the two sockets have **opposite** requirements, and conflating them is the
 mistake to avoid.
 
-**The agent socket does not rely on permissions.** It is mode `0666` and any local
-user may connect; being able to connect *is* being an operator. The trade is
-deliberate: the client is meant to work without anyone being added to a dedicated
-group. On a multi-user host that means every local user can manage the kernel, so
-a deployment that cares must narrow it — either the socket mode or a peer check.
+**Nothing on this list relies on permissions any more.** Every one of these is
+world-accessible by decision, so that an ordinary local user can read and edit the
+configuration and run the agent without `sudo`:
+
+```text
+/etc/proxy-agent/config.toml          0666   readable and writable
+/var/lib/proxy-agent                   0777   writable, so a hand-run agent works
+/var/lib/proxy-agent/state/*.sqlite    0666   set explicitly, not left to umask
+/run/proxy-agent                       0777   writable, so the socket can be made
+/run/proxy-agent/agent.sock            0666
+/run/proxy-agent/mihomo.sock           0666   upstream hardcodes this one
+```
+
+The cost is cumulative and should be stated as one fact rather than six: **any
+local user can fully control the agent and the kernel.** They can edit the
+configuration the agent reads at startup, replace a stored configuration, write
+the metadata database, drive the kernel through either socket, and — because
+`/run/proxy-agent` is writable — unlink `agent.sock` and bind their own, so a
+client that runs `proxyctl status` talks to an impostor.
+
+That last one is qualitatively worse than the others, and worth understanding
+before copying this design elsewhere: the others let a user act on their *own*
+behalf, while replacing the socket lets them act *as the agent* to someone else.
+
+Accepted because the target deployments are single-user hosts and containers,
+where every local user is the operator. `composition.rs` warns about the writable
+socket directory on every start rather than passing it silently, and both READMEs
+document how to tighten each path. A deployment with users who are not the
+operator should set `0751`/`0600` back and set a peer uid or gid check.
+
+`Seal::Preferred` marks the data directories and `Seal::Required` the socket's
+parent, and the difference now only controls *whether the warning fires* — the
+refusal was removed because it rejected the mode the installer itself ships.
 
 **The socket is created by the service manager, not the agent.** `proxy-agent.socket`
 listens on the agent's path and starts `proxy-agent.service` on the first
@@ -637,24 +665,19 @@ it — measured, not inferred. Upstream's own source has the `os.Chmod(addr, 0o6
 `crates/infrastructure/src/mihomo/socket.rs` has a `tighten_socket` that would set
 `0660`, but nothing calls it.
 
-This matters *because* the runtime directory became `0751` to let any local user
-reach the authenticated agent socket. That also lets any local user reach the
-kernel's socket, which is unauthenticated:
+Verified as an unprivileged user, before the runtime directory was opened:
 
 ```text
 curl -X PUT --unix-socket /run/proxy-agent/mihomo.sock -d '{}' http://localhost/configs
+# GET /version -> 200, PUT /configs -> 204
 ```
 
-Verified as an unprivileged user: `GET /version` returns `200` and `PUT /configs`
-returns `204`, so any local user can replace the running kernel configuration. Before
-the socket was opened, the `0750` directory was what prevented this; now nothing
-does. The two requirements are genuinely in conflict when the sockets share a
-directory, and separating them (`kernel/mihomo.sock` under `0750`) is the fix if
-that risk is ever worth removing. It is deliberately not applied today: the target
-deployments are single-user hosts and containers, where the local users are the
-operator.
+so any local user can replace the running kernel configuration. The `0750`
+directory was what prevented this while it lasted; it is `0777` now, so nothing
+does.
 
-Do not describe the kernel socket as protected by its mode. It is not.
+Do not describe the kernel socket as protected by its mode. It is not, and neither
+is anything else in that directory list.
 
 ### Web authentication
 
@@ -1139,9 +1162,11 @@ tests and in development checkouts rooted somewhere else entirely, and a compile
 `/var/lib/proxy-agent` would make that impossible. `proxyctl agent run
 --print-config` reports the effective values and which source supplied each.
 
-`config.toml` must be mode `0600`. The loader refuses to start otherwise, because
-the file may hold the kernel secret — a group- or world-readable secret file is a
-worse failure than a refusal to start.
+`config.toml` is `0666` on a packaged install, and the loader **does not check its
+mode at all** — a deployment that wants a private file sets `0600` and gets it.
+The check was removed rather than loosened, because it refused the mode the
+installer ships and because the secret it guarded is reachable anyway through the
+kernel's world-writable socket.
 
 Do not put full generated YAML into SQLite unless there is a concrete requirement.
 

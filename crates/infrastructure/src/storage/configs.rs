@@ -38,13 +38,39 @@ use crate::storage::{SqlitePool, storage_err};
 
 /// File permissions for a stored configuration body.
 ///
-/// A config carries proxy credentials and the controller secret, so it is not
-/// world-readable. `0640` keeps it readable by a group member (an operator, or
-/// the agent's own group) without opening it to every local user.
-pub const CONFIG_FILE_MODE: u32 = 0o640;
+/// A stored configuration body is readable by any local user.
+///
+/// It carries proxy credentials and the kernel's controller secret, which is why
+/// this was `0640`. The reason it is not private any more is the same one that
+/// applies to `config.toml` and to the agent socket: the secret is already
+/// reachable on this host. Mihomo hardcodes `chmod 0666` on its controller socket
+/// and verifies no secret over one, so any local user can already `PUT /configs`
+/// against the running kernel — keeping the *file* from them protected it from
+/// everyone except the people who could act on it.
+///
+/// `0666`: readable and writable by any local user, matching `config.toml` and the
+/// agent socket.
+///
+/// The bodies are immutable by *convention* — the agent never edits one in place,
+/// it writes a new version — but that convention is enforced by the code that
+/// writes them, not by the file mode, and a deployment where an operator wants to
+/// inspect or diff a stored body should not need `sudo` to do it. Writing one out
+/// of band changes what the kernel loads only if the active pointer is also moved,
+/// which is a separate act with its own command.
+pub const CONFIG_FILE_MODE: u32 = 0o666;
 
 /// File permissions for a directory the agent owns.
-pub const DIRECTORY_MODE: u32 = 0o750;
+///
+/// `0777`: traversable *and* writable by any local user, so a hand-run
+/// `proxyctl agent run` works as an ordinary user rather than only as the service
+/// account. That is the same trade the agent socket and `config.toml` already
+/// make, and for the same reason — see `AGENTS.md`, "Unix socket".
+///
+/// The cost is real and worth stating: any local user can replace a stored
+/// configuration or write to the metadata database. On the single-user hosts and
+/// containers this targets, every local user is the operator; a deployment with
+/// users who are not should run the agent as a service and set these modes back.
+pub const DIRECTORY_MODE: u32 = 0o777;
 
 /// Stores configuration versions on the filesystem with metadata in SQLite.
 #[derive(Debug, Clone)]

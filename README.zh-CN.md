@@ -160,6 +160,18 @@ unit 存在的理由就是这个：它指定了用户、用正确的权限创建
 
 ### 谁能用
 
+**本机任何用户都能完整控制这台机器上的 agent。** 这不是比喻：socket 是 `0666`，配置是 `0666`，数据目录与运行目录是 `0777`，元数据库是 `0666`。普通用户可以读写配置、直接手跑 agent、写入 agent 状态、并通过 socket 控制内核。
+
+这是刻意的取舍 —— 目标是客户端开箱可用，不需要 `sudo`，也不需要把谁加进专用组。若这台机器上有你不信任的本地用户，需要收紧的地方和方式：
+
+```bash
+chmod 0600 /etc/proxy-agent/config.toml    # 配置私有
+chmod 0755 /var/lib/proxy-agent            # 状态只读
+chmod 0751 /run/proxy-agent                # 阻止他人替换 socket
+```
+
+改完 `/run/proxy-agent` 后,agent 会在启动时提示该目录仍可被他人写入 —— 那是真的,不是噪声。
+
 agent socket 的权限是 `0666`：**本机任何用户都能连上它**，而且 agent 自己做调用方认证，不把文件权限当作边界。这是刻意的 —— 目标是客户端开箱可用，不需要把谁加进某个专用组。
 
 实际含义：
@@ -265,7 +277,7 @@ proxyctl token issue --principal admin
 
 ```text
 位置   /etc/proxy-agent/config.toml
-权限   必须 0600，强制执行。否则加载器拒绝启动：这个文件可能存有内核 secret。
+权限   打包安装为 0666：本机任何用户都能读写，因此编辑它不需要 sudo。加载器不检查权限，所以需要私有文件的部署自行设为 0600。
 参考   /usr/share/doc/proxy-agent/config.toml.example
 ```
 
@@ -301,7 +313,8 @@ proxyctl subscription update airport      # 拉取、转换、校验、激活
 简版：**认证是唯一的授权环节** —— 没有角色，通过认证就能做任何事。本地 socket 信任任何能连上它的人，TCP 必须带 token，浏览器拿到的是 cookie 而非凭证。
 
 * **Unix socket（agent）。** 权限 `0666`，位于一个可穿越的目录。agent 自己做调用方认证；能连上 socket 就等于拥有操作员身份。对端凭证（`SO_PEERCRED`）是**额外可选**的检查，默认关闭 —— 因为 LXC 的 uid 映射会让正确的对端看起来不对。这是[谁能用](#谁能用)里说明的刻意取舍。
-* **Unix socket（内核）。** `0666`，因为 Mihomo 硬编码该值，且在 unix socket 上不校验 secret。因此它**不被保护**：本机任何用户都能访问它并替换运行中的配置。这是放开 agent socket 的代价，这里直说而不是暗示它安全。
+* **Unix socket（内核）。** `0666`，因为 Mihomo 硬编码该值，且在 unix socket 上不校验 secret。因此它**不被保护**：本机任何用户都能访问它并替换运行中的配置。
+* **配置与状态也是开放的。** `/etc/proxy-agent/config.toml` 是 `0666`，`/var/lib/proxy-agent` 与 `/run/proxy-agent` 是 `0777`，元数据库是 `0666` —— 普通用户能读写配置、手跑 agent、并写入 agent 的状态。代价与收紧方式见[谁能用](#谁能用)。
 * **TCP。** 必须有 token，且**没有 loopback 豁免** —— 在同样运行着不可信软件的机器上，loopback 不是信任边界。配置监听时至少要存在一个 token，否则 agent 拒绝启动。
 * **浏览器**用 token 换取 `HttpOnly; SameSite=Strict` 的 cookie。**刻意没有 CSRF token**：那要求它可被脚本读取，而这正是 cookie 方案要避免的问题。
 * **内核 secret 永远不会到达页面。** 由反代注入。上游自己的 all-in-one server 是把控制 token 放进浏览器的；这里不这么做。
@@ -329,7 +342,7 @@ crates/
 **状态存放位置：**
 
 ```text
-/etc/proxy-agent/config.toml        配置              (0600)
+/etc/proxy-agent/config.toml        配置              (0666；需要私有则设 0600)
 /var/lib/proxy-agent/configs/       不可变版本
 /var/lib/proxy-agent/database.sqlite
 /run/proxy-agent/agent.sock         agent        (0666，本机任何用户)

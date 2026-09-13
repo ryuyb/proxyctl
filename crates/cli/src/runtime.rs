@@ -208,30 +208,25 @@ mod tests {
         assert!(error.contains("invalid configuration"), "{error}");
     }
 
-    /// A file with any group or other bit set is refused, because it may hold the
-    /// kernel secret.
+    /// The file's mode is the deployment's decision, not the loader's.
+    ///
+    /// Every one of these was refused before, on the grounds that the file may hold
+    /// the kernel secret. The cost was that an ordinary local user could not read
+    /// the configuration they were expected to edit — and the packaged install made
+    /// it worse, since `/etc/proxy-agent` was `0700` and the failure arrived as
+    /// `Permission denied` before any check ran.
+    ///
+    /// Allowing read is defensible because the secret is already reachable on this
+    /// host: Mihomo hardcodes `chmod 0666` on its controller socket and verifies no
+    /// secret over one, so any local user can already `PUT /configs`. Refusing to
+    /// let them read a file they can already act on protected it from everyone
+    /// except the people who could use it.
+    ///
+    /// `0666` is in the list because the packaged install ships it.
     #[test]
-    fn a_permissive_file_is_refused() {
+    fn the_file_mode_is_not_the_loaders_business() {
         use std::os::unix::fs::PermissionsExt;
-        for mode in [0o644, 0o640, 0o666, 0o604, 0o770] {
-            let dir = tempfile::tempdir().expect("dir");
-            let path = dir.path().join("config.toml");
-            std::fs::write(&path, "[agent]\ninstance = \"x\"\n").expect("write");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
-
-            let mut args = args();
-            args.config = Some(path);
-            let error = prepare(&args).expect_err("a group/other-accessible file must be refused");
-            assert!(error.contains("0600"), "mode {mode:o}: {error}");
-        }
-    }
-
-    /// Owner-only is accepted even when read-only: a read-only configuration is a
-    /// legitimate deployment, not a broken one.
-    #[test]
-    fn an_owner_only_file_is_accepted() {
-        use std::os::unix::fs::PermissionsExt;
-        for mode in [0o600, 0o400] {
+        for mode in [0o600, 0o400, 0o644, 0o640, 0o666, 0o604, 0o770] {
             let dir = tempfile::tempdir().expect("dir");
             let path = dir.path().join("config.toml");
             std::fs::write(&path, "[kernel]\nbinary = \"/x/mihomo\"\n").expect("write");
@@ -239,7 +234,11 @@ mod tests {
 
             let mut args = args();
             args.config = Some(path);
-            assert_eq!(serve(&args).kernel_binary, "/x/mihomo", "mode {mode:o}");
+            assert_eq!(
+                serve(&args).kernel_binary,
+                "/x/mihomo",
+                "mode {mode:o} must be accepted; the mode is the deployment's choice"
+            );
         }
     }
 

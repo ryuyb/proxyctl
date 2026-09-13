@@ -609,10 +609,15 @@ async fn the_active_body_is_readable_after_reopening() {
     );
 }
 
-/// A config carries credentials and the controller secret, so it must not be
-/// world-readable.
+/// A stored body is readable and writable by any local user, by decision.
+///
+/// It carries credentials, which is why it was once unreadable to others; the
+/// reasoning for opening it is recorded on [`CONFIG_FILE_MODE`] and in
+/// `AGENTS.md`. The mode is asserted so a change to it is a deliberate act rather
+/// than a drift nobody notices, and the comment says plainly that this is a risk
+/// accepted rather than a property protected.
 #[tokio::test]
-async fn stored_bodies_are_not_world_readable() {
+async fn stored_bodies_are_open_to_local_users() {
     use std::os::unix::fs::PermissionsExt;
 
     let f = fixture().await;
@@ -625,9 +630,9 @@ async fn stored_bodies_are_not_world_readable() {
         .permissions()
         .mode();
     assert_eq!(
-        mode & 0o007,
-        0,
-        "a config body must not be readable by other users (mode {mode:o})"
+        mode & 0o022,
+        0o022,
+        "a stored body is world-writable by decision (mode {mode:o})"
     );
     assert_eq!(mode & 0o777, CONFIG_FILE_MODE, "unexpected mode {mode:o}");
 }

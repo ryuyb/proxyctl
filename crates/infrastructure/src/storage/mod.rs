@@ -51,6 +51,14 @@ pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// file descriptors without adding throughput.
 pub const DEFAULT_POOL_SIZE: usize = 4;
 
+/// The mode given to the database and its sidecars.
+///
+/// `0666`, matching the directory it lives in: readable and writable by any local
+/// user, so a hand-run agent works as whoever started it. See
+/// [`set_database_modes`] for why this is set explicitly rather than left to the
+/// process umask.
+pub const DATABASE_FILE_MODE: u32 = 0o666;
+
 /// A bounded set of SQLite connections.
 ///
 /// Cloning shares the same pool, so adapters can be cloned cheaply and remain
@@ -122,6 +130,9 @@ impl SqlitePool {
                 .map_err(|_| storage_err("pool closed during construction"))?;
         }
 
+        // The modes are set before `path` is moved into the pool below.
+        set_database_modes(&path);
+
         let pool = Self {
             inner: Arc::new(PoolInner {
                 path,
@@ -137,6 +148,18 @@ impl SqlitePool {
         })
         .await?;
 
+        // The database is left world-writable so a hand-run `proxyctl agent run` as
+        // an ordinary user works, matching the directory it sits in.
+        //
+        // Without this the file is created under the service account's umask, so a
+        // second process running as someone else opens it read-only and fails with
+        // "attempt to write a readonly database" — an error that names the symptom
+        // and not the mode. The sidecars (`-wal`, `-shm`) are matched too, because
+        // SQLite creates those itself at whatever mode it likes and a read-only
+        // WAL is the same failure one step later.
+        //
+        // The trade is the one recorded in `AGENTS.md`: any local user can write
+        // the agent's metadata. Accepted for single-user hosts and containers.
         Ok(pool)
     }
 
@@ -248,3 +271,32 @@ pub mod subscriptions;
 
 #[cfg(test)]
 mod tests;
+
+/// Gives the database and its SQLite sidecars a shared mode, best-effort.
+///
+/// Best-effort rather than fatal: a mode that cannot be set is not a reason to
+/// refuse to start, and the failure it might cause later — a second process denied
+/// write access — is reported by that process with the path in hand. Refusing here
+/// would turn a permissions quirk on one file into an agent that will not boot.
+///
+/// The sidecars may not exist yet, which is why each is attempted independently
+/// rather than requiring all three.
+fn set_database_modes(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut candidates = vec![path.to_path_buf()];
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        candidates.push(sidecar.into());
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            let _ = std::fs::set_permissions(
+                &candidate,
+                std::fs::Permissions::from_mode(DATABASE_FILE_MODE),
+            );
+        }
+    }
+}

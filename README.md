@@ -196,10 +196,28 @@ directory with the right mode, and grants only `CAP_NET_ADMIN`.
 
 ### Who can use it
 
-The agent socket is mode `0666`: **any local user can reach it**, and the agent
-authenticates the caller itself rather than treating the file permissions as the
-boundary. That is deliberate — the client is meant to work without anyone being
-added to a dedicated group.
+**Any local user can fully control the agent on this machine.** That is not a
+figure of speech: the socket is `0666`, the configuration is `0666`, the state and
+runtime directories are `0777`, and the metadata database is `0666`. An ordinary
+user can read and edit the configuration, run the agent by hand, write the agent's
+state, and drive the kernel through the socket.
+
+It is a deliberate trade — the client is meant to work with no `sudo` and nobody
+added to a dedicated group. If this host has local users you do not trust, tighten
+it:
+
+```bash
+chmod 0600 /etc/proxy-agent/config.toml    # configuration private
+chmod 0755 /var/lib/proxy-agent            # state read-only
+chmod 0751 /run/proxy-agent                # no one else can replace the socket
+```
+
+After narrowing `/run/proxy-agent` the agent warns on startup that the directory is
+still writable by others, if it is — that warning is real, not noise.
+
+The agent socket itself is `0666`: **any local user can reach it**, and the agent
+authenticates the caller rather than treating the file permissions as the
+boundary.
 
 What this means in practice:
 
@@ -332,8 +350,9 @@ One file, entirely optional — an empty file is valid and yields the defaults.
 
 ```text
 Location   /etc/proxy-agent/config.toml
-Mode       0600, enforced. The loader refuses to start otherwise: this file may
-           hold the kernel secret.
+Mode       0666 on a packaged install: readable and writable by any local user, so
+           editing it needs no sudo. The loader does not check the mode, so a
+           deployment that wants a private file sets 0600 and gets it.
 Reference  /usr/share/doc/proxy-agent/config.toml.example
 ```
 
@@ -388,9 +407,12 @@ rather than a credential.
   deliberate trade described under [Who can use it](#who-can-use-it).
 * **Unix socket (kernel).** `0666`, because Mihomo hardcodes that and will not
   verify its secret over a unix socket. It is therefore *not* protected: any local
-  user can reach it and replace the running configuration. See
-  [Who can use it](#who-can-use-it) — this is the accepted cost of opening the
-  agent socket, and it is stated plainly rather than implied to be safe.
+  user can reach it and replace the running configuration.
+* **Configuration and state are open too.** `/etc/proxy-agent/config.toml` is
+  `0666`, `/var/lib/proxy-agent` and `/run/proxy-agent` are `0777`, and the
+  metadata database is `0666` — so an ordinary user reads and edits the
+  configuration, runs the agent by hand, and can write the agent's state. See
+  [Who can use it](#who-can-use-it) for what that costs and how to reverse it.
 * **TCP.** A token is required, with **no loopback exemption** — loopback is not a
   trust boundary on a host that also runs untrusted software. Configuring a
   listener requires at least one token to exist, or the agent refuses to start.
@@ -430,7 +452,7 @@ makes it testable without any of them.
 **Where the state lives:**
 
 ```text
-/etc/proxy-agent/config.toml        configuration        (0600)
+/etc/proxy-agent/config.toml        configuration        (0666; set 0600 to keep it private)
 /var/lib/proxy-agent/configs/       immutable versions
 /var/lib/proxy-agent/database.sqlite
 /run/proxy-agent/agent.sock         the agent        (0666; any local user)

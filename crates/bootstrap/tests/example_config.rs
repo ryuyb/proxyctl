@@ -103,14 +103,20 @@ fn the_reference_documents_every_section() {
     }
 }
 
-/// The file must tell the operator about the mode requirement, since getting it
-/// wrong is a refused start rather than a warning.
+/// The example must state the mode it expects, because "the loader does not care"
+/// is only true if the operator has been told so — otherwise the reasonable
+/// assumption is the strict one, and they will `sudo` to edit a file that does not
+/// need it.
 #[test]
-fn the_example_states_the_permission_requirement() {
+fn the_example_states_the_permission_expectation() {
     let text = read_example();
     assert!(
-        text.contains("0600"),
-        "the example must state the 0600 requirement, or the first start fails for a \
-         reason the operator has not been told about"
+        text.contains("0666"),
+        "the example must state the packaged mode, or an operator will assume a \
+         stricter one and reach for sudo unnecessarily"
+    );
+    assert!(
+        !text.contains("refuses to start otherwise"),
+        "the example still claims a refusal the loader no longer performs"
     );
 }

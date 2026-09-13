@@ -1,8 +1,9 @@
 # proxyctl configuration.
 #
 # Location: /etc/proxy-agent/config.toml
-# Mode:     0600 (chmod 600). Any group or other bit makes the loader refuse to
-#           start, because this file may hold the kernel secret.
+# Mode:     0666 (chmod 666) on a packaged install: readable and writable by any
+#           local user, so editing it needs no sudo. The loader does not check the
+#           mode, so a deployment that wants a private file sets 0600 and gets it.
 #
 # This file is entirely optional. Every section and every field may be omitted;
 # an empty file is valid and yields the defaults below. Values are resolved in
@@ -26,8 +27,11 @@
 # its `[agent]` header and TOML rejects it, because the key belongs to no
 # section. Copying a whole section cannot fail that way.
 #
-# Keep this file at mode 0600. The loader refuses to start otherwise, because
-# the file may hold the kernel secret.
+# This file may hold the kernel controller secret, which is why it was once kept
+# at 0600. It no longer has to be, and the packaged install ships 0666: that secret
+# is already reachable on this host, because Mihomo hardcodes `chmod 0666` on its
+# controller socket and verifies no secret over one. Set 0600 yourself if your
+# deployment wants it; the loader accepts either.
 # ===========================================================================
 #
 # [agent]

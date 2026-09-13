@@ -357,19 +357,32 @@ own_config_dir() {
   if [ -d "$CONFIG_DIR" ]; then
     chown "${UNIT_USER}:${UNIT_USER}" "$CONFIG_DIR" 2>/dev/null \
       || warn "could not set the owner of ${CONFIG_DIR} to ${UNIT_USER}"
-    chmod 0700 "$CONFIG_DIR"
+    # 0755, not 0700: the directory has to be traversable for the ordinary local
+    # user this install is aimed at to reach the configuration inside it. A 0700
+    # directory is what produced `Permission denied` on `proxyctl agent run`,
+    # before any file mode was consulted.
+    chmod 0755 "$CONFIG_DIR"
   fi
 }
 
-# Directory modes come from the unit (`ConfigurationDirectoryMode=0700`), but the
-# file is created here so a first run has something to read. `0600` is not
-# cosmetic: the loader refuses to start on a group- or world-readable file,
-# because it may hold the kernel secret.
+# Directory modes come from the unit (`ConfigurationDirectoryMode=0755`), but the
+# file is created here so a first run has something to read.
 #
-# **Owned by the service user, not root.** Mode 0600 with a root owner is a file
-# the agent cannot read — the unit runs as `proxy-agent`, so the service fails at
-# startup with `Permission denied` and systemd reports only an exit code. Found
-# by installing and starting the unit rather than by reading this script.
+# `0666` — readable and writable by anyone local — is deliberate, and matches what
+# the agent socket already does. The file may hold the kernel controller secret,
+# but that secret is already reachable on this host: Mihomo hardcodes `chmod 0666`
+# on its controller socket and verifies no secret over one, so any local user can
+# already `PUT /configs`. Protecting the *file* from people who can already *act*
+# on its contents bought nothing and cost an operator `sudo` to edit their own
+# configuration.
+#
+# A deployment that wants a private file should set `0600` itself. The loader no
+# longer overrules that in either direction.
+#
+# **Owned by the service user, not root.** A root owner with a restrictive mode is
+# a file the agent cannot read — the unit runs as `proxy-agent`, so the service
+# fails at startup with `Permission denied` and systemd reports only an exit code.
+# Found by installing and starting the unit rather than by reading this script.
 if [ -f "$CONFIG" ]; then
   step "Keeping the existing ${CONFIG}"
   # An upgrade must not discard an operator's configuration — including a bad
@@ -380,11 +393,12 @@ if [ -f "$CONFIG" ]; then
   # user, or have been created by an operator's editor running as root.
   chown "${UNIT_USER}:${UNIT_USER}" "$CONFIG" 2>/dev/null \
     || warn "could not set the owner of ${CONFIG} to ${UNIT_USER}"
-  chmod 0600 "$CONFIG"
+  # Not forced to a private mode: an operator who set `0600` keeps it. The default
+  # comes from the file's own creation below, which is 0666.
   own_config_dir
 else
   step "Writing ${CONFIG}"
-  install -d -m 0700 "$CONFIG_DIR"
+  install -d -m 0755 "$CONFIG_DIR"
   cat > "$CONFIG" <<'TOML'
 # proxyctl configuration.
 #
@@ -393,8 +407,10 @@ else
 # and run `proxyctl agent run --print-config` to see what is in effect and
 # which source supplied each value.
 #
-# This file must stay at mode 0600. It may hold the kernel secret, and the
-# loader refuses to start on a group- or world-readable file.
+# Mode 0666: readable and writable by any local user, so editing it needs no sudo.
+# It may hold the kernel secret, but that secret is already reachable on this host
+# through the kernel's own socket, which Mihomo makes world-writable. Set 0600
+# yourself if your deployment wants a private file; the loader accepts either.
 
 [agent]
 socket = "/run/proxy-agent/agent.sock"
@@ -407,7 +423,10 @@ socket = "/run/proxy-agent/agent.sock"
 # missing.
 endpoint = "/run/proxy-agent/mihomo.sock"
 TOML
-  chmod 0600 "$CONFIG"
+  # 0666: readable and writable by any local user, matching the agent socket and
+  # the reason recorded above it. `chmod` rather than `install -m`, because the
+  # file is written by the heredoc above.
+  chmod 0666 "$CONFIG"
   chown "${UNIT_USER}:${UNIT_USER}" "$CONFIG" 2>/dev/null \
     || warn "could not set the owner of ${CONFIG} to ${UNIT_USER}"
   own_config_dir
