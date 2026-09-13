@@ -12,8 +12,8 @@ use crate::ports::process_manager::{ProcessHandle, StartOptions};
 use crate::ports::{
     AuditSink, CapabilityProbe, ConfigRepository, ConfigValidator, EventPublisher,
     InstanceRepository, JobRegistry, KernelInstaller, MihomoConnectionOps, MihomoController,
-    MihomoObserver, ProcessManager, SecretStore, ServiceManager, SubscriptionConverter,
-    SubscriptionRepository,
+    MihomoObserver, ProcessManager, SecretStore, ServiceManager, SessionStore,
+    SubscriptionConverter, SubscriptionRepository,
 };
 use proxy_domain::shared::id::MihomoInstanceId;
 use proxy_domain::subscription::SubscriptionFetchPolicy;
@@ -92,6 +92,8 @@ pub struct AppContext {
     pub services: Arc<dyn ServiceManager>,
     /// Credential handling.
     pub secrets: Arc<dyn SecretStore>,
+    /// Web sessions.
+    pub sessions: Arc<dyn SessionStore>,
     /// Audit log.
     pub audit: Arc<dyn AuditSink>,
     /// Job progress store.

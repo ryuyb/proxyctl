@@ -610,6 +610,25 @@ pub struct CloseAllInput {
     pub confirm: Option<bool>,
 }
 
+/// Who is signed in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionDto {
+    /// The principal identifier.
+    pub principal: String,
+    /// What it may do: `admin` or `read-only`.
+    pub role: String,
+}
+
+/// A sign-in request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionInput {
+    /// The API token to exchange for a session.
+    ///
+    /// In the body rather than a query parameter: a query string is recorded by
+    /// every proxy and appears in logs, and a token is a bearer credential.
+    pub token: String,
+}
+
 /// An error response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ErrorDto {

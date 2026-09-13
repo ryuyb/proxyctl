@@ -42,6 +42,7 @@ use crate::ports::process_manager::{
 };
 use crate::ports::secret_store::{Principal, PrincipalSummary, Role, SecretStore};
 use crate::ports::service_manager::ServiceManager;
+use crate::ports::session_store::{SessionId, SessionStore};
 use crate::ports::subscription_converter::{ConvertRequest, SubscriptionConverter};
 use crate::ports::subscription_repository::SubscriptionRepository;
 use crate::ports::types::{
@@ -1238,5 +1239,89 @@ impl InstanceRepository for FakeInstanceRepository {
             .lock()
             .map_err(|_| PortError::Storage("poisoned".into()))?;
         Ok(instances.values().cloned().collect())
+    }
+}
+
+/// A session store over an in-memory map.
+///
+/// Stateful rather than fixed, because the properties worth testing are the
+/// transitions: a session created must resolve, and one revoked must not. A double
+/// that always answered the same way could not tell a correct implementation from
+/// one that never stored anything.
+#[derive(Debug, Default)]
+pub struct FakeSessionStore {
+    sessions: Mutex<HashMap<String, (String, Role)>>,
+    next: Mutex<u64>,
+}
+
+impl FakeSessionStore {
+    /// How many sessions are held, for assertions.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.sessions.lock().map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Whether no sessions are held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[async_trait]
+impl SessionStore for FakeSessionStore {
+    async fn create(&self, principal: &str, role: Role, _now: i64) -> Result<SessionId, PortError> {
+        if principal.trim().is_empty() {
+            return Err(PortError::Storage("a session needs a principal".to_owned()));
+        }
+        let mut next = self
+            .next
+            .lock()
+            .map_err(|_| PortError::Storage("lock".to_owned()))?;
+        *next += 1;
+        let id = format!("session-{next}");
+        self.sessions
+            .lock()
+            .map_err(|_| PortError::Storage("lock".to_owned()))?
+            .insert(id.clone(), (principal.to_owned(), role));
+        Ok(SessionId::new(id))
+    }
+
+    async fn resolve(&self, id: &SessionId, _now: i64) -> Result<Option<Principal>, PortError> {
+        // Expiry is not simulated: the policy has its own tests against the real
+        // store, and a double that guessed at it would be a second implementation
+        // to keep in step.
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| PortError::Storage("lock".to_owned()))?
+            .get(id.as_str())
+            .map(|(principal, role)| Principal {
+                id: principal.clone(),
+                role: *role,
+            }))
+    }
+
+    async fn revoke(&self, id: &SessionId) -> Result<bool, PortError> {
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| PortError::Storage("lock".to_owned()))?
+            .remove(id.as_str())
+            .is_some())
+    }
+
+    async fn revoke_principal(&self, principal: &str) -> Result<usize, PortError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| PortError::Storage("lock".to_owned()))?;
+        let before = sessions.len();
+        sessions.retain(|_, (held, _)| held != principal);
+        Ok(before - sessions.len())
+    }
+
+    async fn sweep(&self, _now: i64) -> Result<usize, PortError> {
+        Ok(0)
     }
 }

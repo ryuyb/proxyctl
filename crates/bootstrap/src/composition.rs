@@ -116,6 +116,7 @@ impl Bootstrap {
             .capabilities(probe)
             .services(factory.services())
             .secrets(factory.secrets())
+            .sessions(factory.sessions())
             .audit(factory.audit())
             .jobs(factory.jobs())
             .kernel(factory.kernel())

@@ -62,6 +62,7 @@ use proxy_application::ports::mihomo_observer::{
 use proxy_application::ports::process_manager::ProcessManager;
 use proxy_application::ports::secret_store::SecretStore;
 use proxy_application::ports::service_manager::ServiceManager;
+use proxy_application::ports::session_store::SessionStore;
 use proxy_application::ports::subscription_converter::{ConvertRequest, SubscriptionConverter};
 use proxy_application::ports::subscription_repository::SubscriptionRepository;
 use proxy_application::ports::types::DownloadedArtifact;
@@ -85,6 +86,7 @@ use proxy_infrastructure::storage::configs::FileConfigRepository;
 use proxy_infrastructure::storage::instances::SqliteInstanceRepository;
 use proxy_infrastructure::storage::jobs::SqliteJobRegistry;
 use proxy_infrastructure::storage::secrets::SqliteSecretStore;
+use proxy_infrastructure::storage::sessions::SqliteSessionStore;
 use proxy_infrastructure::storage::subscriptions::SqliteSubscriptionRepository;
 use proxy_infrastructure::subscription::SubStoreConverter;
 use proxy_infrastructure::system::{LinuxCapabilityProbe, SystemdServiceManager};
@@ -541,6 +543,10 @@ impl AdapterFactory for RealFactory {
 
     fn services(&self) -> Arc<dyn ServiceManager> {
         Arc::new(SystemdServiceManager::new())
+    }
+
+    fn sessions(&self) -> Arc<dyn SessionStore> {
+        Arc::new(SqliteSessionStore::new(self.pool.clone()))
     }
 
     fn secrets(&self) -> Arc<dyn SecretStore> {

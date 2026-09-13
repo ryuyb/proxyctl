@@ -145,9 +145,12 @@ impl From<AuthError> for HttpError {
             AuthError::NoCredential
             | AuthError::MissingToken
             | AuthError::InvalidToken
-            | AuthError::VerificationFailed(_) => StatusCode::UNAUTHORIZED,
-            // A recognised caller that is not allowed is a different answer.
-            AuthError::NotPermitted { .. } => StatusCode::FORBIDDEN,
+            | AuthError::VerificationFailed(_)
+            | AuthError::InvalidSession => StatusCode::UNAUTHORIZED,
+            // A recognised caller that is not allowed is a different answer, and
+            // so is a refusal for crossing origins: the credential may be
+            // perfectly valid, which is what makes the distinction worth keeping.
+            AuthError::NotPermitted { .. } | AuthError::CrossOrigin => StatusCode::FORBIDDEN,
         };
         Self {
             status,

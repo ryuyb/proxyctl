@@ -96,6 +96,7 @@ impl Harness {
                 .capabilities(Arc::new(FakeCapabilityProbe::minimal()))
                 .services(Arc::new(FakeServiceManager))
                 .secrets(Arc::new(FakeSecretStore::default()))
+                .sessions(Arc::new(FakeSessionStore::default()))
                 .audit(audit.clone())
                 .jobs(jobs.clone())
                 .kernel(Arc::new(FakeKernelInstaller))

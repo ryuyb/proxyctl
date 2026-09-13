@@ -80,6 +80,12 @@ pub struct AppState {
     /// a browser blocks everything else. Only a TCP listener sets this: a unix
     /// socket cannot be reached by a browser, so it has nothing to permit.
     pub cors_origins: Vec<String>,
+    /// Whether requests arrive over TLS.
+    ///
+    /// Decides the session cookie's `Secure` attribute. It cannot be inferred from
+    /// the connection, because TLS is terminated by a reverse proxy in front of
+    /// this listener — the connection here is plain HTTP either way.
+    pub behind_tls: bool,
 }
 
 impl AppState {
@@ -91,6 +97,7 @@ impl AppState {
             auth,
             events: None,
             cors_origins: Vec::new(),
+            behind_tls: false,
         }
     }
 
@@ -106,6 +113,7 @@ impl AppState {
             auth,
             events: Some(events),
             cors_origins: Vec::new(),
+            behind_tls: false,
         }
     }
 }

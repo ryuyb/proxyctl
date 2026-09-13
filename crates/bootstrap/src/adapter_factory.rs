@@ -21,8 +21,8 @@ use std::sync::Arc;
 use proxy_application::ports::{
     AuditSink, CapabilityProbe, ConfigRepository, ConfigValidator, EventPublisher,
     InstanceRepository, JobRegistry, KernelInstaller, MihomoConnectionOps, MihomoController,
-    MihomoObserver, ProcessManager, SecretStore, ServiceManager, SubscriptionConverter,
-    SubscriptionRepository,
+    MihomoObserver, ProcessManager, SecretStore, ServiceManager, SessionStore,
+    SubscriptionConverter, SubscriptionRepository,
 };
 use proxy_domain::system::environment::InitSystem;
 
@@ -79,6 +79,13 @@ pub trait AdapterFactory: Send + Sync {
     /// Credential handling.
     fn secrets(&self) -> Arc<dyn SecretStore>;
 
+    /// Where web sessions live.
+    ///
+    /// Separate from [`secrets`](Self::secrets) because the two have different
+    /// lifetimes and revocation stories: an API token is long-lived and belongs to
+    /// a script, a session is short-lived and belongs to a browser.
+    fn sessions(&self) -> Arc<dyn SessionStore>;
+
     /// Audit log.
     fn audit(&self) -> Arc<dyn AuditSink>;
 
@@ -114,10 +121,11 @@ pub mod in_memory {
         MihomoObserver, ProcessManager, SecretStore, ServiceManager, SubscriptionConverter,
         SubscriptionRepository,
     };
+    use proxy_application::ports::session_store::SessionStore;
     use proxy_application::test_support::{
         FakeAuditSink, FakeCapabilityProbe, FakeConnectionOps, FakeController, FakeConverter,
         FakeEventPublisher, FakeInstanceRepository, FakeJobRegistry, FakeKernelInstaller,
-        FakeObserver, FakeProcessManager, FakeSecretStore, FakeServiceManager,
+        FakeObserver, FakeProcessManager, FakeSecretStore, FakeServiceManager, FakeSessionStore,
         FakeSubscriptionRepository, FakeValidator,
     };
 
@@ -176,6 +184,10 @@ pub mod in_memory {
 
         fn secrets(&self) -> Arc<dyn SecretStore> {
             Arc::new(FakeSecretStore::default())
+        }
+
+        fn sessions(&self) -> Arc<dyn SessionStore> {
+            Arc::new(FakeSessionStore::default())
         }
 
         fn audit(&self) -> Arc<dyn AuditSink> {

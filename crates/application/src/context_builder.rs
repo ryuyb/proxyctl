@@ -18,8 +18,8 @@ use crate::locks::{InstanceLocks, SubscriptionGuards};
 use crate::ports::{
     AuditSink, CapabilityProbe, ConfigRepository, ConfigValidator, EventPublisher,
     InstanceRepository, JobRegistry, KernelInstaller, MihomoConnectionOps, MihomoController,
-    MihomoObserver, ProcessManager, SecretStore, ServiceManager, SubscriptionConverter,
-    SubscriptionRepository,
+    MihomoObserver, ProcessManager, SecretStore, ServiceManager, SessionStore,
+    SubscriptionConverter, SubscriptionRepository,
 };
 
 /// Which dependency was not supplied.
@@ -60,6 +60,7 @@ pub struct AppContextBuilder {
     capabilities: Option<Arc<dyn CapabilityProbe>>,
     services: Option<Arc<dyn ServiceManager>>,
     secrets: Option<Arc<dyn SecretStore>>,
+    sessions: Option<Arc<dyn SessionStore>>,
     audit: Option<Arc<dyn AuditSink>>,
     jobs: Option<Arc<dyn JobRegistry>>,
     kernel: Option<Arc<dyn KernelInstaller>>,
@@ -156,6 +157,13 @@ impl AppContextBuilder {
         self
     }
 
+    /// Sets the session store.
+    #[must_use]
+    pub fn sessions(mut self, sessions: Arc<dyn SessionStore>) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
     /// Sets the audit sink.
     #[must_use]
     pub fn audit(mut self, audit: Arc<dyn AuditSink>) -> Self {
@@ -247,6 +255,7 @@ impl AppContextBuilder {
             capabilities: self.capabilities.ok_or(MissingDependency("capabilities"))?,
             services: self.services.ok_or(MissingDependency("services"))?,
             secrets: self.secrets.ok_or(MissingDependency("secrets"))?,
+            sessions: self.sessions.ok_or(MissingDependency("sessions"))?,
             audit: self.audit.ok_or(MissingDependency("audit"))?,
             jobs: self.jobs.ok_or(MissingDependency("jobs"))?,
             kernel: self.kernel.ok_or(MissingDependency("kernel"))?,
