@@ -84,6 +84,26 @@ pub trait Command {
     /// is a real possibility: the server's contract could have moved on.
     fn render(&self, response: &Response) -> Result<String, Exit>;
 
+    /// The exit code for a response the command rendered successfully.
+    ///
+    /// # Why this exists separately from `render`
+    ///
+    /// `render` returning `Err` means *the body was not the shape this command
+    /// expects* — a contract problem, reported as such. That is a different thing
+    /// from **the server answering correctly and the answer being bad news**, which
+    /// is what `config validate` produces: a `200` whose body says the document is
+    /// rejected.
+    ///
+    /// Collapsing the two would make a rejected configuration print "the agent's
+    /// response was not the expected shape", which is both wrong and unhelpful.
+    /// So the rendered text stays the output, and this decides the status a script
+    /// sees. The default is `Success`, because for every other command a rendered
+    /// response *is* a success.
+    #[must_use]
+    fn exit_code(&self, _response: &Response) -> Exit {
+        Exit::Success
+    }
+
     /// Renders a non-success response.
     ///
     /// Defaulted because the useful behaviour is the same nearly everywhere —
@@ -549,7 +569,29 @@ impl Command for ConfigValidate {
             field(&value, "semantic"),
             if acceptable { "acceptable" } else { "rejected" }
         );
+
         Ok(text)
+    }
+
+    /// A rejected document is a failure, not a report.
+    ///
+    /// The status is `200` — the request succeeded, and the answer is what the
+    /// document is — so this cannot be derived from the transport.
+    ///
+    /// This was returning `Success` unconditionally, which meant
+    /// `proxyctl config validate && proxyctl config activate` activated a rejected
+    /// document: the word "rejected" was printed and the exit code said success, so
+    /// a script saw agreement.
+    fn exit_code(&self, response: &Response) -> Exit {
+        let acceptable = serde_json::from_str::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|value| value.get("acceptable").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        if acceptable {
+            Exit::Success
+        } else {
+            Exit::Failure
+        }
     }
 }
 
@@ -1055,6 +1097,80 @@ mod tests {
             status: 200,
             body: body.to_string(),
         }
+    }
+
+    /// A rejected configuration must fail the process, not just print a word.
+    ///
+    /// The agent answers `200` — the request succeeded and the answer is what the
+    /// document is — so the status says nothing. This was returning `Success`
+    /// regardless, which made `proxyctl config validate && proxyctl config
+    /// activate` activate a rejected document: "rejected" was printed and the exit
+    /// code said success, so a script saw agreement.
+    #[test]
+    fn a_rejected_configuration_exits_non_zero() {
+        let command = ConfigValidate { body: "x".into() };
+
+        let rejected = ok(serde_json::json!({
+            "preflight": "passed",
+            "syntax": "passed",
+            "semantic": "failed: unknown key",
+            "acceptable": false,
+        }));
+        assert_eq!(command.exit_code(&rejected), Exit::Failure);
+        // The text still renders, so the reason reaches the operator. Returning
+        // `Err` from `render` would have replaced it with "the agent's response was
+        // not the expected shape", which is both wrong and unhelpful.
+        let text = command.render(&rejected).expect("renders");
+        assert!(text.contains("rejected"), "{text}");
+        assert!(
+            text.contains("unknown key"),
+            "the reason must survive: {text}"
+        );
+
+        let accepted = ok(serde_json::json!({
+            "preflight": "passed",
+            "syntax": "passed",
+            "semantic": "passed",
+            "acceptable": true,
+        }));
+        assert_eq!(command.exit_code(&accepted), Exit::Success);
+        assert!(
+            command
+                .render(&accepted)
+                .expect("renders")
+                .contains("acceptable")
+        );
+    }
+
+    /// A response that says nothing about acceptability must not be reported as a
+    /// failure. A missing field is a shape change, and claiming the document was
+    /// rejected would be a worse lie than claiming nothing.
+    #[test]
+    fn a_validate_response_without_the_field_exits_non_zero() {
+        let command = ConfigValidate { body: "x".into() };
+        // `acceptable` absent: the conservative reading is "not shown to be
+        // acceptable", which is what a validation gate should assume.
+        assert_eq!(
+            command.exit_code(&ok(serde_json::json!({ "syntax": "passed" }))),
+            Exit::Failure
+        );
+    }
+
+    /// Every other command's rendered response is a success.
+    ///
+    /// Asserted so that adding this method did not make anything else start
+    /// failing: the default is `Success`, and this is the check that it stays so.
+    #[test]
+    fn other_commands_succeed_when_they_render() {
+        let response = ok(serde_json::json!([]));
+        assert_eq!(
+            ConfigList {
+                instance: "default".into(),
+                limit: 50,
+            }
+            .exit_code(&response),
+            Exit::Success
+        );
     }
 
     /// Every command must address the versioned API. A command that forgot the

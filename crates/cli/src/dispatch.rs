@@ -174,12 +174,19 @@ pub async fn run(cli: Cli) -> Exit {
         // shape, and two definitions drift.
         Format::Json => {
             println!("{}", response.body);
-            Exit::Success
+            // The same rule as the human path, and for the same reason. `--json`
+            // is the form a script parses, so getting the exit code wrong here
+            // would matter more than getting it wrong in the rendered output.
+            command.exit_code(&response)
         }
         Format::Human => match command.render(&response) {
+            // The text is the output, but the status comes from the command: a
+            // `200` can still be bad news, which is what `config validate`
+            // produces for a rejected document. Reporting `Success` here meant the
+            // word "rejected" printed alongside an exit code of `0`.
             Ok(text) => {
                 println!("{text}");
-                Exit::Success
+                command.exit_code(&response)
             }
             Err(code) => {
                 eprintln!("proxyctl: the agent's response was not the expected shape");

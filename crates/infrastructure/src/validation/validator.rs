@@ -8,7 +8,7 @@
 //! |---|---|---|
 //! | L0 preflight | port conflicts, missing geodata | the kernel reports neither before it tries to bind |
 //! | L1 syntax | YAML errors | the kernel does catch these, but only after writing state |
-//! | L2 semantic | types, enums, references, **and unknown fields** | `mihomo -t` accepts unknown fields |
+//! | L2 semantic | types, enums, references, **unknown fields, and wrong-key values** | `mihomo -t` accepts unknown fields, and accepts a socket path on the address field |
 //! | observe | which ports are taken | observation, not judgement |
 //!
 //! # `mihomo -t` is not a dry run, and that shapes everything
@@ -23,7 +23,16 @@
 //!
 //! So the kernel check is run in a throwaway directory that is removed
 //! afterwards, the candidate file is confirmed to exist first, and the result is
-//! combined with the field whitelist.
+//! combined with the field whitelist and the value check in
+//! [`values`](crate::validation::values).
+//!
+//! # The same gap, one level down
+//!
+//! A *well-formed value on the wrong key* passes `-t` for the same reason a
+//! misspelled key does: the kernel accepts the document and then does not do what
+//! was meant. `external-controller: /run/mihomo.sock` is the case that made this
+//! concrete — measured, `-t` reports `test is successful` and exits `0`, while the
+//! kernel at runtime fails to open its control API and keeps running anyway.
 //!
 //! # Unknown fields warn rather than reject
 //!
@@ -42,7 +51,7 @@ use proxy_application::ports::PortError;
 use proxy_application::ports::config_validator::{ConfigValidator, PreflightContext};
 use proxy_domain::configuration::{ConfigBody, LevelOutcome};
 
-use crate::validation::whitelist;
+use crate::validation::{values, whitelist};
 
 /// Names of the geo data files the kernel downloads on demand.
 pub const GEODATA_FILES: &[&str] = &["geoip.metadb", "GeoSite.dat", "geoip.dat", "geosite.dat"];
@@ -258,26 +267,51 @@ impl ConfigValidator for KernelConfigValidator {
         }
 
         let unknown = unknown_fields(body);
+        // Values the kernel accepts but does not use. A separate question from an
+        // unknown key — this key is spelled correctly and is in the list — so it is
+        // a separate check, and both are reported together.
+        let mistakes = values::inspect(body);
 
         let kernel = self.run_kernel_check(body).await?;
 
-        match (&kernel, unknown.is_empty()) {
-            (LevelOutcome::Passed, true) => Ok(LevelOutcome::Passed),
-            // The kernel is authoritative about everything except unknown keys.
-            (LevelOutcome::Failed(reason), _) => Ok(LevelOutcome::Failed(reason.clone())),
-            // An unknown key is a *warning*: upstream adds fields between
-            // releases, so rejecting outright would break a valid new config on
-            // an older agent. Reported so a typo is visible rather than silent.
-            (LevelOutcome::Passed, false) => Ok(LevelOutcome::Failed(format!(
+        match &kernel {
+            // The kernel is authoritative about everything except what it accepts
+            // silently, which is what the two checks below exist for.
+            LevelOutcome::Failed(reason) => return Ok(LevelOutcome::Failed(reason.clone())),
+            LevelOutcome::Skipped(reason) => return Ok(LevelOutcome::Skipped(reason.clone())),
+            LevelOutcome::Passed => {}
+        }
+
+        if unknown.is_empty() && mistakes.is_empty() {
+            return Ok(LevelOutcome::Passed);
+        }
+
+        // Both are *warnings* rather than rejections, for the same reason: the
+        // kernel runs, so refusing the configuration outright would be more
+        // disruptive than the fault. Reported so an operator sees them.
+        //
+        // A value mistake is listed first, because it breaks a feature outright
+        // while an unknown key merely falls back to a default.
+        let mut complaints = Vec::new();
+
+        for mistake in &mistakes {
+            complaints.push(values::describe(mistake));
+        }
+
+        if !unknown.is_empty() {
+            // An unknown key: upstream adds fields between releases, so rejecting
+            // outright would break a valid new config on an older agent.
+            complaints.push(format!(
                 "the kernel accepted the configuration, but these keys are not in the \
                  field list for mihomo {}: {}. A misspelled key is ignored by the kernel \
                  and silently falls back to its default. If these are fields added in a \
                  newer release, regenerate the field list",
                 whitelist::SOURCE_TAG,
                 unknown.join(", ")
-            ))),
-            (LevelOutcome::Skipped(reason), _) => Ok(LevelOutcome::Skipped(reason.clone())),
+            ));
         }
+
+        Ok(LevelOutcome::Failed(complaints.join("; ")))
     }
 
     async fn observe_port_usage(&self, ports: &[u16]) -> Result<Vec<u16>, PortError> {

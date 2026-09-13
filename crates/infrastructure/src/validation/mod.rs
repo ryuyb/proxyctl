@@ -5,6 +5,7 @@
 //! from upstream's own struct tags.
 
 pub mod validator;
+pub mod values;
 pub mod whitelist;
 
 pub use validator::KernelConfigValidator;

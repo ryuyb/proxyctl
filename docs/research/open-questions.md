@@ -255,11 +255,12 @@ http://10.0.0.1/s                    -> ACCEPTED
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | **`PARTIAL`（我们自己的生成正确；用户的配置仍是一个诊断缺口）** |
+| 状态 | **`RESOLVED`（2026-09-13）** |
 | 实测现象 | mihomo `v1.19.30`（linux/arm64）：`external-controller: /run/mihomo.sock` **不生效**——内核把它当 `host:port` 解析，报 `listen tcp: address ...: missing port in address`，而且**只打日志、不退出**（进程继续运行，代理端口正常监听）。正确键是 **`external-controller-unix`**（另有 CLI 覆盖参数 `-ext-ctl-unix`）。 |
 | 已核实 | 我们的生成器**是对的**：`crates/domain/src/configuration/generation.rs` 在 `ControllerEndpoint::UnixSocket` 分支写 `external-controller-unix`，并有测试断言它**不**写 `external-controller:`（`generation.rs` 的 `assert!(!text.contains("\nexternal-controller: "))`）。白名单也已含该键。 |
 | 剩余风险 | **用户自己写的配置**不受我们控制。若运维手工写错，症状是「内核在跑、控制口不存在」的静默故障——`/clash-api` 反代、TUI、CLI 全部不可用，而 `proxyctl status` 可能仍显示 Running。 |
-| 待决策 | 是否让 `/clash-api` 或 Doctor 在「控制器不可达」时**检查配置里是否存在 `external-controller: <路径>` 这种写法**，并给出可执行的诊断（「应为 `external-controller-unix`」）。这是一个低成本、高价值的诊断，但目前没有。 |
+| 已落地 | **L2 语义校验新增值检查**（`crates/infrastructure/src/validation/values.rs`）：发现 `external-controller` 的值是绝对路径时，报 `misconfigured_controller` 并给出字段、值、症状与改法。同时修了 CLI 的退出码——`config validate` 对「拒绝」原本返回 `0`，使 `validate && activate` 会激活一个被拒绝的配置。 |
+| 实测确认 | 真实内核 `mihomo -t` 对错误写法输出 **`configuration file ... test is successful`（exit 0）**——这正是必须自研该检查的原因。真实 agent 上：错误写法 → `semantic: failed`、exit 1；正确写法 → `acceptable: true`、exit 0；`--json` 路径同样正确。 |
 | 来源 | 本次实现的实测（2026-09-13），见 `docs/design/metacubexd-embedding.md` §1；生成器核实见 `generation.rs:242` |
 
 ## Q017 — Mihomo README 的命名限制如何落地？
@@ -413,9 +414,9 @@ $app.route('/api/subs')
 
 | 状态 | 数量 | 条目 |
 |---|---|---|
-| `RESOLVED` | 15 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用）、**Q023**（2026-09-12：入库不可绕过，但有 PATCH/PUT 修改接口；`content=` 只覆盖远端抓取）、**Q012**（2026-09-12：守卫已存在但未被调用，已接线）、**Q016**（2026-09-13：Highcharts 授权已取得，内嵌已实现） |
-| `PARTIAL` | 10 | Q001、Q004、Q011、Q017、Q018、Q019、Q021、Q022、Q025、**Q027**（2026-09-13：生成器已正确，用户的配置仍是诊断缺口） |
-| `OPEN` | 3 | Q009、Q024、**Q026**（2026-09-13：字体/图形署名，阻塞对外 release 而非开发） |
+| `RESOLVED` | 16 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用）、**Q023**（2026-09-12：入库不可绕过，但有 PATCH/PUT 修改接口；`content=` 只覆盖远端抓取）、**Q012**（2026-09-12：守卫已存在但未被调用，已接线）、**Q016**（2026-09-13：Highcharts 授权已取得，内嵌已实现）、**Q027**（2026-09-13：L2 值检查已落地，并修正 CLI 退出码） |
+| `PARTIAL` | 9 | Q001、Q004、Q011、Q017、Q018、Q019、Q021、Q022、Q025 |
+| `OPEN` | 2 | Q009、Q024 |
 
 **结论**：Phase 0 的**架构阻塞项已全部解决**（Q002/Q003/Q006/Q007/Q008/Q010/Q013/Q014 均 `RESOLVED`），
 且 **Q016 这个长期阻塞 Dashboard 的许可问题已于 2026-09-13 收口**。剩余 `OPEN` 项均属于
@@ -425,5 +426,4 @@ $app.route('/api/subs')
 Q026       → 对外 release 前（署名义务；不影响开发）
 Q009/Q004  → Linux/PVE 里程碑前（需真机）
 Q024       → 网络能力里程碑前
-Q027       → 可随时做；低成本诊断改进
 ```

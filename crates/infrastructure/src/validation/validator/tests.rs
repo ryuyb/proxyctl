@@ -379,6 +379,80 @@ async fn a_misspelled_key_is_caught_even_though_the_kernel_accepts_it() {
     );
 }
 
+/// A socket path on `external-controller` is caught even though the kernel
+/// accepts it.
+///
+/// This is the case the value check exists for. The kernel parses that field as a
+/// `host:port`, so a path makes it fail to listen — and then **keeps running**.
+/// `mihomo -t` accepts the document, so nothing else in the pipeline reports it,
+/// and the symptom an operator sees is a healthy kernel whose control API does not
+/// exist: no dashboard, no CLI, no TUI.
+///
+/// Asserted through `validate_semantic` rather than against `values::inspect`
+/// directly, because the point is that it reaches the report — `values.rs` has its
+/// own tests for the detection itself.
+#[tokio::test]
+async fn a_socket_path_on_the_address_field_is_caught_even_though_the_kernel_accepts_it() {
+    let Some(_) = test_binary() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("dir");
+    let v = validator(dir.path(), true).await;
+
+    let outcome = v
+        .validate_semantic(&body(
+            "mixed-port: 17890
+external-controller: /run/mihomo.sock
+             mode: rule
+rules:
+  - MATCH,DIRECT
+",
+        ))
+        .await
+        .expect("semantic");
+
+    assert!(
+        outcome.is_failed(),
+        "the value check must catch what the kernel accepts: {outcome:?}"
+    );
+    let summary = outcome.summary();
+    assert!(
+        summary.contains("misconfigured_controller"),
+        "the finding must carry its stable code: {summary}"
+    );
+    assert!(
+        summary.contains("external-controller-unix"),
+        "the finding must name the field to use instead: {summary}"
+    );
+}
+
+/// The correct field must pass, or the check would flag its own advice.
+#[tokio::test]
+async fn the_socket_field_itself_passes_semantic_validation() {
+    let Some(_) = test_binary() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("dir");
+    let v = validator(dir.path(), true).await;
+
+    let outcome = v
+        .validate_semantic(&body(
+            "mixed-port: 17890
+external-controller-unix: /tmp/mihomo.sock
+             mode: rule
+rules:
+  - MATCH,DIRECT
+",
+        ))
+        .await
+        .expect("semantic");
+
+    assert!(
+        outcome.is_passed(),
+        "the correct field must not be reported: {outcome:?}"
+    );
+}
+
 /// A type error is the kernel's job and must still be reported.
 #[tokio::test]
 async fn a_type_error_is_reported_by_the_kernel_check() {
