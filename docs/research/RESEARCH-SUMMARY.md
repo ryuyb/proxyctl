@@ -126,7 +126,7 @@ Phase 0 调研**推翻了设计文档中的若干假设**，实现前必须按�
 | M1 | §12、§43 | `GET /download/sub?target=ClashMeta&url=...` 是 Sub-Store 公开接口 | **该端点不存在**。改为两段式：`POST /api/subs`（幂等写入）+ `GET /download/:name?target=<白名单>` |
 | M2 | §12 | Sub-Store 产出可直接作为 Mihomo Config | Sub-Store **只输出 `proxies:` 段**；完整配置（端口/controller/secret/dns/tun/groups/rules）**必须由 Agent 生成** |
 | M3 | §12 优先级 | 优先级：Sub-Store → sub-store-convert → Native | sub-store-convert **Rejected**（能力子集 + 失败面破坏不变量 + 许可阻塞） |
-| M4 | §29、§47 | "直接提供 metacubexd 静态文件" | 需升级为**静态托管 + 同源 Clash API 反代**（避免 CORS/`external-ui`/浏览器持有 secret）；**不启用**其 agent/all-in-one 形态 |
+| M4 | §29、§47 | "直接提供 metacubexd 静态文件" | 需升级为**静态托管 + 同源 Clash API 反代**（避免 CORS/`external-ui`/浏览器持有 secret）；**不启用**其 agent/all-in-one 形态。**已实现**（2026-09-13）：`/ui` 静态 + `/clash-api` 反代（HTTP 与 WS），`/api/control` 返回 404。见 `docs/design/metacubexd-embedding.md` |
 | M5 | §22、§21 | LXC 能力检测（隐含 bool 语义） | 必须用**五值枚举**；`/dev/net/tun` 存在 ≠ TUN 可用（需 `ioctl(TUNSETIFF)` 验证） |
 | M6 | §30 | Unix socket 不校验 secret（已知） | 补充：socket 还被硬编码 `chmod 0666` → Agent **必须**主动收紧权限，否则同机任意用户可控制内核 |
 | M7 | §17 | reload 失败保留旧配置（方向正确） | 补充实现细节：`PUT /configs` **必须带 JSON body**（空 body 400）；**禁止 `force=true`**；**回滚必须用 restart 而非 reload**；必须用 `path` 模式且受 `SAFE_PATHS` 约束；健康检查必须含**代理端口**（bind 失败不致命、`/version` 仍 200） |

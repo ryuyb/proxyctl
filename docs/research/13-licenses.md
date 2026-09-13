@@ -28,7 +28,7 @@
 | 1 | **Mihomo**（代理内核） | `MetaCubeX/mihomo` @ `Meta` 分支 / tag `v1.19.30` | `GPL-3.0-only`（保守解释；上游文字为 "GPL-3.0"） | `[上游 LICENSE 原文]` 35149B sha `3972dc97…` | **Dynamic Dependency**（运行时下载，默认）或 **Bundled**（deb 内置，可选） | Bundled：Corresponding Source + license 全文 + 保留版权声明 + 修改声明（无修改则声明无修改）+ 无附加限制；Dynamic：义务落在最终用户侧 | 中（可管理） |
 | 2 | **Sub-Store** | `sub-store-org/Sub-Store` @ `master`（backend v2.39.6） | `AGPL-3.0-only` | `[上游 LICENSE 原文]` 34577B sha `08e3bf9a…` + `package.json` `"license": "AGPL-3.0"` | **External Service**（独立进程/容器，仅 HTTP API） | 不分发则无 conveying 义务；若 Bundled 则需 Corresponding Source + AGPL 全文；**修改后对外提供网络交互才触发 §13** | 中（靠进程边界隔离） |
 | 3 | **sub-store-convert** | npm `sub-store-convert` v2.36.33 | 标称 `MIT`，实际内联 AGPL-3.0 代码 `[法律问题-待确认]` | `[上游 LICENSE 原文]`（tarball 内 `index.js` 内容） | **不使用 / 不作为分发物**（若必须用，仅作 External Service 且需上游澄清） | 若按 AGPL 认定：Corresponding Source + AGPL 全文 + 修改声明；按 MIT 认定则仅需保留声明 | **高** |
-| 4 | **metacubexd**（Dashboard） | `MetaCubeX/metacubexd` @ `main`（monorepo v1.273.1） | 应用 `MIT`；含 `Highcharts`（proprietary）、`UFL-1.0` 字体、`CC-BY-4.0` 字体图形 | `[上游 LICENSE 原文]` 1096B sha `cd0735ba…` + npm/registry 元数据 | **Bundled**（内嵌静态构建产物）或 External Service | MIT：保留版权与许可声明（UI 内 + 发行物 NOTICE）；Highcharts：商业许可决策；字体：署名 | **高**（Highcharts） |
+| 4 | **metacubexd**（Dashboard） | `MetaCubeX/metacubexd` @ `gh-pages`（v1.273.1） | 应用 `MIT`；含 `Highcharts`（**已授权**）、`UFL-1.0` 字体、`CC-BY-4.0` 字体图形 | `[上游 LICENSE 原文]` 1096B sha `cd0735ba…` + npm/registry 元数据 | **Bundled**（内嵌静态构建产物，已实现） | MIT：保留版权与许可声明；Highcharts：**已取得商业授权**；字体与图形：署名（Q026） | 中（仅剩署名） |
 | 5 | **ShellCrash** | `juewuy/ShellCrash` @ `dev` | `GPL-3.0-only` | `[上游 LICENSE 原文]` 35149B sha `3972dc97…`（与 GPL-3.0 全文一致） | **Source Reuse：不使用**。仅 feature-level 对标 | 无（不复制代码即无义务） | 低 |
 | 6 | **Rust crates** | crates.io | 见 §5.2（MIT / MIT OR Apache-2.0 等，全部宽松） | `[上游文档声明]`（crates.io registry 元数据） | **Bundled**（静态链接进二进制） | 保留 license 全文 + NOTICE（MIT/Apache-2.0 要求）；Apache-2.0 含专利授权与 NOTICE 传递 | 低 |
 | 7 | **前端依赖** | npm（若自研 UI） | 待定，按 allow-list 治理 | `[推测]` | Bundled（打进静态资源） | 按各依赖要求保留声明；禁止 copyleft/非商业许可 | 中 |
@@ -42,7 +42,7 @@
 | Mihomo (GPL-3.0) | ⚠️ 需完整履行 GPL-3.0 §4/§5/§6：附 license 全文、保留声明、提供 Corresponding Source（或 §6(b) 书面 offer / §6(d) 同址源码访问） | — | ✅ 推荐。由 agent 代表用户从上游获取，我们不 conveying；义务不落在我们身上 | ❌ 严禁（会把整个 Rust 二进制拖入 GPL-3.0） |
 | Sub-Store (AGPL-3.0) | ⚠️ 可行但成本高：需 Corresponding Source + AGPL 全文；且必须确保它是"聚合"而非衍生 | ✅ **推荐**。不改源码 + 仅 HTTP + 进程隔离 → 不触发 §13，不传染 | ✅ 允许（同 Mihomo 逻辑）；但注意用户交互条款 | ❌ 严禁 |
 | sub-store-convert (MIT 标称/AGPL 疑云) | ❌ 不建议（AGPL 传染风险） | ⚠️ 仅在上游/法务澄清后 | ⚠️ 同上 | ❌ 严禁 |
-| metacubexd (MIT + Highcharts) | ⚠️ 条件性允许：MIT 部分保留声明即可；**Highcharts 必须先解决**；字体需署名 | ✅ 作为独立静态服务可降低内嵌风险 | ✅ 允许 | ⚠️ MIT 允许，但需保留版权声明；Highcharts 部分仍受限 |
+| metacubexd (MIT + Highcharts) | ✅ **允许**：MIT 保留声明；Highcharts 授权已取得；字体与图形需署名（Q026） | ✅ | ✅ | ⚠️ MIT 允许；保留版权声明 |
 | ShellCrash (GPL-3.0) | ❌ | — | — | ❌（仅作 feature 对标） |
 
 ---
@@ -258,7 +258,15 @@ copies or substantial portions of the Software.
 
 **结构变化提示**：当前 `main` 已不是单一 SolidJS SPA，而是 `packages/ui`（Nuxt/Vue）+ `apps/server` + `apps/desktop` 的 monorepo。旧的 `src/*.tsx` 布局在 `main` 上已不存在（`src/App.tsx` → HTTP 404）。`[上游文档声明]`
 
-#### 3.4.1 ⚠️ Highcharts：非开源许可（本次调研最高风险项）
+#### 3.4.1 ✅ Highcharts：非开源许可 —— **已取得授权（2026-09-13）**
+
+> **状态更新**：本项目已取得 Highsoft 商业授权，因此可以内嵌 metacubexd 的构建产物并对外分发。
+> 「移除/替换 Highcharts」的工程规避方案（见下方最后一条）**不再需要**，也没有被采用。
+> 内嵌方案因此按 ADR-006 D1 的原始形态落地：上游静态产物原样使用，不 patch 其源码。
+>
+> 仍待履行的是**署名义务**（UFL-1.0 字体、CC-BY-4.0 图形），见 §3.4.2 与 Q026。
+
+以下为调研当时的判断，保留作为决策依据的记录：
 
 `[上游文档声明]` npm registry `highcharts@13.0.2`：`"license": "https://www.highcharts.com/license"`，author `Highsoft AS`。
 `[上游 LICENSE 原文]` 包内 `LICENSE.txt`（348 bytes，经 jsDelivr 与 unpkg 双源一致）：
@@ -380,7 +388,7 @@ By installing or using this software, you agree to these terms.
 | Mihomo | **主：Dynamic Dependency**；**备选：Bundled**（提供 `proxy-agent-mihomo` 子包或下载器） | Dynamic：无我方 GPL 义务，但需版本/校验和记录与镜像来源说明。Bundled：GPL-3.0 全文 + Corresponding Source（指向 tag 的源码 tarball 或 §6(d) 同址访问）+ 无修改声明 + 无附加限制 |
 | Sub-Store | **External Service** | 不分发：仅需部署文档 + 版本兼容声明 + 不修改源码的纪律；若改为 Bundled：AGPL 全文 + Corresponding Source |
 | sub-store-convert | **不使用**（澄清前） | 无；若未来使用则按 AGPL 处理（见 §8） |
-| metacubexd | **Bundled 静态产物**（前端资源内嵌） | MIT 版权与许可声明保留（UI 内可访问的 about/licenses 页面 + 发行物 NOTICE）；Highcharts 单独决策；UFL-1.0 与 CC-BY-4.0 字体署名 |
+| metacubexd | **Bundled 静态产物**（前端资源内嵌，**已实现**） | MIT 版权与许可声明保留；**Highcharts 商业授权已取得**；UFL-1.0 与 CC-BY-4.0 字体/图形署名（**待完成**，Q026） |
 | ShellCrash | **不复制**（仅 feature 对标） | 无 |
 | Rust crates | **Bundled**（静态链接） | 每个依赖保留 license 文本；Apache-2.0 依赖需保留 NOTICE（若有）；由 `cargo about` 生成 THIRD-PARTY-NOTICES |
 | 前端依赖 | **Bundled** | 仅允许宽松许可；保留声明；禁止 copyleft 与 CC-NC |

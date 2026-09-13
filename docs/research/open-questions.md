@@ -42,8 +42,8 @@
 |---|---|
 | 状态 | **`RESOLVED`** |
 | 结论 | **不复用其 agent**。它确实包含 supervisor（`packages/agent/src/supervisor.ts`：spawn mihomo、`-t` 校验、崩溃退避、SSE 日志）、profile 单槽 `.bak` 回滚、内核下载热切换 —— 但它面向桌面/容器场景，**没有 systemd、没有 PVE LXC 能力检测、没有多实例、没有版本历史**；其官方 All-in-One Server 会与我们的 systemd 托管形成**双 supervisor 冲突**。 |
-| 决策 | 只以**静态产物**形态内嵌其 UI + 同源 Clash API 反代（ADR-006 D1）；`/api/control` 形态不启用。 |
-| 注意 | 其依赖含 **Highcharts（专有许可）**，内嵌分发前必须处理（见 Q016）。 |
+| 决策 | 只以**静态产物**形态内嵌其 UI + 同源 Clash API 反代（ADR-006 D1）；`/api/control` 形态不启用。**已实现**（2026-09-13）。 |
+| 注意 | 其依赖含 Highcharts（专有许可）——**授权已取得**（Q016，已关闭）。字体与图形署名另见 Q026。 |
 | 来源 | `docs/research/07-metacubexd.md` §1/§4、`docs/research/13-licenses.md` §1 |
 
 ## Q004 — PVE unprivileged LXC + TUN 的最小权限组合是什么？
@@ -235,10 +235,32 @@ http://10.0.0.1/s                    -> ACCEPTED
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | **`OPEN`（法律问题-待确认，阻塞内嵌方案）** |
-| 背景 | metacubexd 应用为 MIT，但 `packages/ui` 依赖 `highcharts`，其 npm license 指向 `https://www.highcharts.com/license`，包内 LICENSE.txt 写明**商业使用须 Highsoft Standard License Agreement**。另含 UFL-1.0 字体与 CC-BY-4.0 资源（需署名）。 |
-| 待决策 | 是否替换/移除 Highcharts 组件、取得授权、或改为可选由用户自行部署 Dashboard。 |
-| 关联 | ADR-006 D1、R13 §1/§6 |
+| 状态 | **`RESOLVED`（2026-09-13）** |
+| 结论 | **Highcharts 商业授权已取得**，内嵌上游构建产物不再有许可阻塞。 |
+| 落地 | 方案 A（Agent 内嵌静态产物 + 同源 `/clash-api` 反代）**已实现**，见 `docs/design/metacubexd-embedding.md`。产物由 `scripts/fetch-metacubexd.sh` 从上游 `gh-pages` 拉取，版本记录在 `frontend/metacubexd/UPSTREAM_VERSION`（当前 `v1.273.1`）。 |
+| 剩余义务 | UFL-1.0 字体与 CC-BY-4.0 图形需在发行物 NOTICE 中署名。**尚未完成**——见 Q026。 |
+| 关联 | ADR-006 D1/C5、R13 §3.4 |
+
+## Q026 — 内嵌 metacubexd 的字体与图形署名义务如何履行？
+
+| 字段 | 内容 |
+|---|---|
+| 状态 | **`OPEN`（合规，非阻塞）** |
+| 背景 | 内嵌产物含 `_fonts/`（Ubuntu 字体，UFL-1.0）与 Twemoji flag 图形（Apache-2.0 + CC-BY-4.0 视觉设计）。UFL-1.0 与 CC-BY-4.0 均要求署名。 |
+| 待决策 | 署名放在哪：deb 的 `copyright` 文件、`docs/third-party.md`、还是二进制内的一个 `--licenses` 输出？三者受众不同（分发物、仓库读者、运维）。 |
+| 说明 | 分包不触发该义务——只有**分发构建产物**才触发。因此这不阻塞开发，但阻塞一次对外 release。 |
+| 关联 | Q016、R13 §3.4 |
+
+## Q027 — mihomo 的 unix socket 控制口用哪个配置键？
+
+| 字段 | 内容 |
+|---|---|
+| 状态 | **`PARTIAL`（我们自己的生成正确；用户的配置仍是一个诊断缺口）** |
+| 实测现象 | mihomo `v1.19.30`（linux/arm64）：`external-controller: /run/mihomo.sock` **不生效**——内核把它当 `host:port` 解析，报 `listen tcp: address ...: missing port in address`，而且**只打日志、不退出**（进程继续运行，代理端口正常监听）。正确键是 **`external-controller-unix`**（另有 CLI 覆盖参数 `-ext-ctl-unix`）。 |
+| 已核实 | 我们的生成器**是对的**：`crates/domain/src/configuration/generation.rs` 在 `ControllerEndpoint::UnixSocket` 分支写 `external-controller-unix`，并有测试断言它**不**写 `external-controller:`（`generation.rs` 的 `assert!(!text.contains("\nexternal-controller: "))`）。白名单也已含该键。 |
+| 剩余风险 | **用户自己写的配置**不受我们控制。若运维手工写错，症状是「内核在跑、控制口不存在」的静默故障——`/clash-api` 反代、TUI、CLI 全部不可用，而 `proxyctl status` 可能仍显示 Running。 |
+| 待决策 | 是否让 `/clash-api` 或 Doctor 在「控制器不可达」时**检查配置里是否存在 `external-controller: <路径>` 这种写法**，并给出可执行的诊断（「应为 `external-controller-unix`」）。这是一个低成本、高价值的诊断，但目前没有。 |
+| 来源 | 本次实现的实测（2026-09-13），见 `docs/design/metacubexd-embedding.md` §1；生成器核实见 `generation.rs:242` |
 
 ## Q017 — Mihomo README 的命名限制如何落地？
 
@@ -391,14 +413,17 @@ $app.route('/api/subs')
 
 | 状态 | 数量 | 条目 |
 |---|---|---|
-| `RESOLVED` | 14 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用）、**Q023**（2026-09-12：入库不可绕过，但有 PATCH/PUT 修改接口；`content=` 只覆盖远端抓取）、**Q012**（2026-09-12：守卫已存在但未被调用，已接线） |
-| `PARTIAL` | 9 | Q001、Q004、Q011、Q017、Q018、Q019、Q021、Q022、Q025 |
-| `OPEN` | 3 | Q009、Q016、Q024 |
+| `RESOLVED` | 15 | Q001(PARTIAL→已定实现方式)、Q002、Q003、Q005（方向）、Q006、Q007、Q008、Q010、Q013、Q014、**Q015**（2026-09-12：默认不经镜像）、**Q020**（2026-09-12：`-t` 确有副作用）、**Q023**（2026-09-12：入库不可绕过，但有 PATCH/PUT 修改接口；`content=` 只覆盖远端抓取）、**Q012**（2026-09-12：守卫已存在但未被调用，已接线）、**Q016**（2026-09-13：Highcharts 授权已取得，内嵌已实现） |
+| `PARTIAL` | 10 | Q001、Q004、Q011、Q017、Q018、Q019、Q021、Q022、Q025、**Q027**（2026-09-13：生成器已正确，用户的配置仍是诊断缺口） |
+| `OPEN` | 3 | Q009、Q024、**Q026**（2026-09-13：字体/图形署名，阻塞对外 release 而非开发） |
 
-**结论**：Phase 0 的**架构阻塞项已全部解决**（Q002/Q003/Q006/Q007/Q008/Q010/Q013/Q014 均 `RESOLVED`）。剩余 `OPEN` 项均属于**实施细节或法律确认**，不阻塞 Domain Model 与 Application Ports 的设计，但必须在对应里程碑前收口：
+**结论**：Phase 0 的**架构阻塞项已全部解决**（Q002/Q003/Q006/Q007/Q008/Q010/Q013/Q014 均 `RESOLVED`），
+且 **Q016 这个长期阻塞 Dashboard 的许可问题已于 2026-09-13 收口**。剩余 `OPEN` 项均属于
+**实施细节或合规确认**，不阻塞 Domain Model 与 Application Ports 的设计，但必须在对应里程碑前收口：
 
 ```text
-Q016       → 内嵌前（ADR-006 D1）；Q015 已收口（默认不经镜像，只走上游 release 直连）
+Q026       → 对外 release 前（署名义务；不影响开发）
 Q009/Q004  → Linux/PVE 里程碑前（需真机）
 Q024       → 网络能力里程碑前
+Q027       → 可随时做；低成本诊断改进
 ```

@@ -31,6 +31,34 @@ proxyctl token issue --principal dev --role admin
 proxyctl agent run --config /etc/proxy-agent/config.toml
 ```
 
+## The embedded dashboard
+
+This is not the only interface the agent serves. `frontend/metacubexd/` holds the
+upstream metacubexd dashboard, fetched by `scripts/fetch-metacubexd.sh` and served
+at `/ui`. It covers what this interface deliberately does not: proxy-group member
+switching, node latency tests, the live traffic graph, and rule inspection.
+
+The two are separate on purpose. This bundle is this repository's own vocabulary —
+lifecycle, configuration versions, subscriptions, capabilities — and the dashboard
+is a view over the kernel's own Clash API. Merging them would mean reimplementing
+the dashboard, which ADR-001 already declined to do.
+
+```text
+/ui/*          the dashboard        (embedded artifact)
+/clash-api/*   its data feed        (relayed to the kernel; the browser holds no secret)
+/              this interface       (and the single-page fallback)
+```
+
+`/api/control` answers `404` so the dashboard hides its Profile and kernel-control
+pages — those would run upstream's own supervisor alongside this agent's. See
+`docs/design/metacubexd-embedding.md`.
+
+### Working on this bundle
+
+`pnpm dev` proxies `/ui`, `/clash-api`, and `/api` to the agent, so both interfaces
+are reachable from the Vite server at `http://127.0.0.1:5173/ui/`. The dashboard
+itself is a built artifact, so its sources are upstream's and are not in this tree.
+
 ## How this reaches the browser
 
 `crates/interfaces/build.rs` walks `frontend/admin/dist/` at compile time and

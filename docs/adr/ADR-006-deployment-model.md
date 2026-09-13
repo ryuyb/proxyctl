@@ -33,7 +33,10 @@ Debian / Ubuntu + systemd + PVE LXC，x86_64 / aarch64
 | C2 | **Sub-Store 是 AGPL-3.0**；"独立进程 + 仅 HTTP + 不修改"不触发 §13 | R13 §1/§3 |
 | C3 | **sub-store-convert 判定 Rejected**（含许可阻塞） | R06 §1/§7、ADR-002 |
 | C4 | **metacubexd 已含 agent/supervisor**，其官方 All-in-One Server 会与我们的 systemd 托管形成**双 supervisor 冲突** → 只能取其**静态产物** | R07 §1/§4 |
-| C5 | metacubexd 应用 MIT，但**依赖含 Highcharts（专有）**+ UFL-1.0 字体 + CC-BY-4.0 资源 → 内嵌分发前必须处理 | R13 §1 |
+| C5 | metacubexd 应用 MIT，但**依赖含 Highcharts（专有）**+ UFL-1.0 字体 + CC-BY-4.0 资源。**Highcharts 商业授权已取得**（2026-09-13），内嵌阻塞解除；字体与图形仍需在 NOTICE 中署名 | R13 §1/§3.4 |
+
+> **C5 状态更新（2026-09-13）**：Highcharts 授权已到位，ADR-006 D1 的「静态产物内嵌」方案已落地实现。
+> 实现细节与实测结论见 `docs/design/metacubexd-embedding.md`（状态：已实现）。
 | C6 | **容器内常常没有 systemd**（`/proc/1/comm=sh`）→ 必须有 direct-process 回退 | R10 §1 |
 | C7 | **单 unit 不双 unit**；静态用户 `proxy-agent`（非 `DynamicUser=`）；Mihomo 是 Agent 子进程 | R09 C1/C2/C3 |
 | C8 | deb 用 conffile 保护用户配置；unit 放 `/usr/lib/systemd/system/`；postinst **不 enable/不 start/不覆盖** | R09 C10 |
@@ -47,16 +50,20 @@ Debian / Ubuntu + systemd + PVE LXC，x86_64 / aarch64
 
 ### D1. **默认模型 = Model D**（Agent + Mihomo + Optional Converter + metacubexd 静态产物）
 
+> **状态：已实现**（2026-09-13）。实现与实测结论见 `docs/design/metacubexd-embedding.md`；
+> 下面的路径已按实现校正，与本文档初稿有两处不同：自研 UI 服务在**根路径**（不是 `/admin/*`），
+> 且监听端口由配置决定（默认 `127.0.0.1:8765`，实测环境用 9090）。
+
 ```text
-                    ┌──────────────────────────────┐
-   Browser  ──────► │  proxy-agent :8765           │
-                    │  ├── /api/v1/*   (REST)      │
-                    │  ├── /ws/v1/*    (WS)        │
-                    │  ├── /admin/*    (自研 UI)    │
-                    │  ├── /ui/*       (metacubexd │  ← 静态产物内嵌，同源反代
-                    │  │               静态资源)    │
-                    │  └── /clash-api  (反代)       │
-                    └───────┬──────────────┬───────┘
+                    ┌────────────────────────────────────┐
+   Browser  ──────► │  proxy-agent（socket + 可选 TCP）    │
+                    │  ├── /api/v1/*    (REST)           │
+                    │  ├── /ws/v1/*     (NDJSON 流)       │
+                    │  ├── /            (自研 UI，fallback)│
+                    │  ├── /ui/*        (metacubexd 静态)  │  ← 内嵌产物
+                    │  ├── /clash-api/* (HTTP + WS 反代)   │  ← 注入 secret
+                    │  └── /api/control → 404             │  ← 强制上游进纯 panel
+                    └───────┬──────────────┬─────────────┘
                             │              │
                 ┌───────────▼───┐   ┌──────▼─────────┐
                 │ Mihomo 子进程  │   │ Sub-Store（可选）│
@@ -64,6 +71,10 @@ Debian / Ubuntu + systemd + PVE LXC，x86_64 / aarch64
                 │  Agent 托管)   │   │ 默认不安装       │
                 └───────────────┘   └────────────────┘
 ```
+
+**`/api/control` 返回 404 是 D1 的一部分，不是缺失。** 上游 metacubexd 探这个路径来
+判断自己是否运行在「控制 agent」旁边；任何错误都会让它退回纯 panel 模式，从而隐藏
+Profile 与内核控制页。返回 404 是在不修改上游源码的前提下落实 C4「只取静态产物」的手段。
 
 **选择 D 的理由**
 
@@ -219,14 +230,19 @@ UI 不得出现单一 "Update" 按钮（设计文档 §39、ADR-004 D6）。
 ### 4.1 正面
 
 - 默认安装即得可用代理 + 配置版本化 + Doctor，**不强制引入任何外部服务**。
-- 许可证边界清晰：Sub-Store 独立进程、metacubexd 静态产物（需处理 Highcharts）、Mihomo 独立二进制。
+- 许可证边界清晰：Sub-Store 独立进程、metacubexd 静态产物（Highcharts 授权已取得，字体/图形需署名）、Mihomo 独立二进制。
 - 升级/回滚三条链路独立，失败域隔离。
 - 无 systemd 环境仍可运行（direct-process 回退）。
 
 ### 4.2 负面 / 成本
 
 - 用户要 Dashboard 之外的订阅能力需自行部署 Sub-Store（文档需提供明确的部署指引）。
-- 内嵌 metacubexd 静态产物需处理 **Highcharts 专有许可**（C5）——可能需替换该图表组件或取得授权。
+- ~~内嵌 metacubexd 静态产物需处理 Highcharts 专有许可~~ —— **已解决**（C5）：授权已取得。
+  剩余义务是署名，见 R13 §3.4。
+- **产物获取依赖网络**：`scripts/fetch-metacubexd.sh` 从上游 `gh-pages` 拉取。离线构建不进
+  行此步，此时 Agent 提供占位页并照常工作——但一个「完整」的 release 构建需要网络。
+- **上游升级是手动跟进的**：`UPSTREAM_VERSION` 记录内嵌的 tag，但没有自动检查上游新版本
+  的机制。上游若改动 Clash API 的用法（例如新增依赖 `/api/control` 的能力），需要人工发现。
 - Mihomo Bundled 时的 GPL-3.0 源码提供义务需要 deb 打包流程支持（`source-offer.txt`）。
 - direct-process 回退模式意味着我们要自己实现重启与生命周期（systemd 场景下是免费的）。
 
@@ -235,10 +251,11 @@ UI 不得出现单一 "Update" 按钮（设计文档 §39、ADR-004 D6）。
 ```text
 1. Agent API 与 Mihomo controller 绝不默认 0.0.0.0（ADR-005）
 2. Sub-Store 不由 Agent 托管、不自动升级；部署模板必须显式设 127.0.0.1
-3. 不采用 metacubexd agent/all-in-one 形态（双 supervisor）
-4. postinst 不 enable/不 start/不覆盖用户配置
-5. 内核升级与配置回滚必须独立（三条链路）
-6. Bundled Mihomo 必须履行 GPL-3.0 义务；命名避免 "mihomo"（C9）
+3. 不采用 metacubexd agent/all-in-one 形态（双 supervisor）；`/api/control` 必须保持 404
+4. `/clash-api` 是唯一允许浏览器触达内核的通道，且**不得**向浏览器透露内核 secret
+5. postinst 不 enable/不 start/不覆盖用户配置
+6. 内核升级与配置回滚必须独立（三条链路）
+7. Bundled Mihomo 必须履行 GPL-3.0 义务；命名避免 "mihomo"（C9）
 ```
 
 ---

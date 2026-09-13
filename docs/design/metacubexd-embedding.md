@@ -1,8 +1,13 @@
 # 内嵌 metacubexd 仪表盘 — 设计方案
 
-> 状态：设计稿（待确认） | 日期：2026-09-13
-> 关联：ADR-006 D1/C4/C5、R07（`docs/research/07-metacubexd.md`）、R13 §3.4、Q016
+> 状态：**已实现**（2026-09-13） | 日期：2026-09-13
+> 关联：ADR-006 D1/C4/C5、R07（`docs/research/07-metacubexd.md`）、R13 §3.4、Q016（已关闭）
 > 前置结论：**Q016 已解决** —— 用户已取得 Highcharts 商业授权，因此可以内嵌上游构建产物。
+>
+> **实现已完成并在真实环境验证**（Debian 12 + 真实 mihomo v1.19.30 + 真实浏览器）。
+> 本文档保留为设计记录；下方标 ✅ 的条目是实测确认的，标 ⚠️ 的是**实测推翻了初稿假设**的。
+> 实现产出的回归测试见 `crates/interfaces/src/http/upgrade.rs` 与
+> `crates/infrastructure/src/mihomo/clash_relay.rs`。
 
 ---
 
@@ -133,22 +138,97 @@
 
 ## 4. 落地顺序（每步可独立验证）
 
+> **全部完成**（2026-09-13）。实际执行顺序与初稿略有不同：WS 升级（原 ①）留到最后，
+> 因为 HTTP 路径能先独立验证，且升级一旦接上就依赖前面的反代结构。
+
 | # | 步骤 | 验证方式 |
 |---|---|---|
-| ① | **WS 反代 spike** | 用 curl/websocat 对 `/clash-api/` 打通 `Upgrade`，确认帧双向流动。**这是 go/no-go** |
-| ② | 拉取脚本 + 版本记录 | 断网跑一次确认降级；联网跑一次确认产物结构 |
-| ③ | `build.rs` 双 bundle | `cargo build` 后检查生成的 bundle 常量含 154 个条目 |
-| ④ | `/ui` 静态路由 + CSP | curl 验证 `index.html`、`_nuxt/*`、缺失资源 404 |
-| ⑤ | `/api/control/info` → 404 | curl 验证，并在浏览器确认 Profile/控制页消失 |
-| ⑥ | `/clash-api` HTTP 反代 + ADMIN | curl 用只读 token 确认 403；admin token 确认能拿到 `/version` |
-| ⑦ | 浏览器端到端 | Playwright：填占位 secret 能连上，overview/traffic/logs 三页有数据 |
-| ⑧ | 文档 + ADR | 更新 ADR-006、Q016 关闭、R13 补 Highcharts 授权结论 |
+| ① ✅ | **WS 反代 spike** | 用 curl/websocat 对 `/clash-api/` 打通 `Upgrade`，确认帧双向流动。**这是 go/no-go** |
+| ② ✅ | 拉取脚本 + 版本记录 | 断网跑一次确认降级；联网跑一次确认产物结构 |
+| ③ ✅ | `build.rs` 双 bundle | `cargo build` 后检查生成的 bundle 常量含 154 个条目 |
+| ④ ✅ | `/ui` 静态路由 + CSP | curl 验证 `index.html`、`_nuxt/*`、缺失资源 404 |
+| ⑤ ✅ | `/api/control/info` → 404 | curl 验证，并在浏览器确认 Profile/控制页消失 |
+| ⑥ ✅ | `/clash-api` HTTP 反代 + 按方法分流 | curl 用只读 token 确认 403；admin token 确认能拿到 `/version` |
+| ⑦ ✅ | 浏览器端到端 | Playwright：填占位 secret 能连上，overview/traffic/logs 三页有数据 |
+| ⑧ ✅ | 文档 + ADR | 更新 ADR-006、Q016 关闭、R13 补 Highcharts 授权结论 |
 
 ---
 
-## 5. 需要你确认的两个点
+## 5. 实现记录：设计推错了什么
 
-（原第 3 点「WS spike 失败退路」已消除：spike 通过，见 D4。）
+这一节比上面的设计更有价值——以下每一条都是**初稿的假设被实测推翻**，且都在真实环境中
+付出了调试代价。写下来是为了不让下一个人重犯，也因为其中两条在原始代码注释里是**写反的**。
+
+| # | 初稿假设 | 实测结果 | 代价 |
+|---|---|---|---|
+| ⚠️ 1 | 「转发浏览器的 `sec-websocket-key` 是可选优化——key 只要是合法 nonce 就行」 | **错。** 内核用收到的 key 派生 `accept`，浏览器拿**自己发的** key 去校验。换掉 key 必然失败于 `Incorrect 'Sec-WebSocket-Accept' header value` | 所有 WS 页面不可用。**注释里写对了原理、实现写反了** |
+| ⚠️ 2 | 「`connection` 是 hop-by-hop，逐跳剥离」 | **只在请求方向成立。** `101` 响应必须以 `Connection: Upgrade` 才算合法，剥掉后浏览器报 `'Connection' header value must be 'Upgrade'` | 所有 WS 页面不可用 |
+| ⚠️ 3 | 「`defaultBackendURL` 用相对路径 `/clash-api` 即可，会相对于 origin 解析」 | **错。** 上游对无 scheme 的值拼 `location.protocol`，`/clash-api` → `http:///clash-api`，它把 `clash-api` 当成了**主机名** | 仪表盘默认后端指向不存在的 host |
+| ⚠️ 4 | 「响应头拿到后即可 abort 连接驱动」 | **错。** 响应**头**先到、body 后到，提前 abort 会关掉还没读完 body 的 socket | 所有请求失败于 `connection closed before message completed` |
+| ⚠️ 5 | 「`{*path}` 通配符会匹配 `/ui/`」 | **错。** axum 的 wildcard 要求至少一个字符，`/ui/` 空尾不匹配，落到单页 fallback 后返回**admin 界面** | 正确的 URL 出现错误的界面 |
+| ⚠️ 6 | 「可以不转发 `Host`，内核按 socket 寻址不需要它」 | **错。** HTTP/1.1 要求 `Host`；缺失报 `400 missing required Host header`，转发调用方的又会产生**两个 Host 头**得到无说明的 `400` | 所有请求 400 |
+
+### 一个关于测试的教训
+
+第 4 条的回归测试**第一版写错了、且不会失败**：测试服务器把响应头和 body 一次
+`write_all` 发出，socket 缓冲区里已经没有「在途」数据可丢，于是有 bug 也通过。
+改成分两次发送（中间停顿）后才真正复现。
+
+第 1 条同样如此：只断言「返回了 101」的测试会通过，因为 bug 在**发给内核的字节**里。
+现在断言的是内核实际收到的请求。
+
+**原则**：这一层的测试必须断言**对端收到了什么**，而不是「我们没报错」——relay 的错误
+全部发生在两个 socket 之间，任何只看自己返回值的测试都是无效的。
+
+## 6. 验证记录（实测）
+
+环境：Debian 12 (aarch64) + 真实 mihomo `v1.19.30` (linux/arm64) + Chromium（Playwright）。
+
+```text
+静态服务
+  /ui            → 200  5359 B  <title>MetaCubeXD</title>
+  /ui/           → 200  5359 B  （修复前返回 1547 B 的 admin 界面）
+  /ui/_nuxt/*.js → 200  489426 B
+  /ui/sw.js      → 200  350 B   （中性化，非上游的 6116 KiB）
+  /ui/config.js  → 200  defaultBackendURL: location.origin + '/clash-api'
+
+控制面
+  /api/control/info → 404  {"hasAgent":false}  → 上游隐藏 Profile/内核控制页
+
+反代（session → agent → unix socket → 内核）
+  GET  /clash-api/version  → 200  {"meta":true,"version":"v1.19.30"}
+  GET  /clash-api/configs  → 200  完整运行时配置
+  GET  /clash-api/proxies  → 200  节点列表
+
+WebSocket（真实浏览器，零错误）
+  OPEN /clash-api/connections
+  OPEN /clash-api/traffic
+  OPEN /clash-api/memory
+  OPEN /clash-api/logs
+
+权限分流
+  admin:     GET → 200, WS → 101, PUT/POST → 放行
+  read-only: GET → 200, WS → 101（收到真实流量帧）, PUT/POST → 403
+```
+
+浏览器逐页确认数据来自内核：代理组 `GLOBAL | 2/2`、配置页显示内核版本 `v1.19.30`、
+规则页 `Match → DIRECT`。
+
+## 7. 顺带发现：内核的 unix 控制口用法
+
+实测 `mihomo v1.19.30`：`external-controller: <路径>` **不生效**，内核把它当 `host:port`
+解析并报 `missing port in address`，而且**只打日志、不退出**——得到一个「内核在跑、
+控制口不存在」的静默故障。正确键是 **`external-controller-unix`**。
+
+已核实我们的生成器写的是后者（`crates/domain/src/configuration/generation.rs`），
+且有测试断言它**不**写 `external-controller:`。剩余缺口见 Q027。
+
+## 8. 原设计待确认项 —— 均已有结论
+
+- **产物来源**：采用「拉上游 `gh-pages` 发布物」，理由是零 Node 构建依赖、不 fork 上游。
+- **`/clash-api` 权限粒度**：采用**按 HTTP 方法分流**，理由是上游全部写操作都是
+  `PUT`/`POST` 且无 `GET` 改状态，实现后已在真实环境验证两种角色。
+- **WS 升级退路**：无需退路——hyper 的 `with_upgrades()` 方案在真实内核上验证通过。
 
 1. **产物来源**：接受「拉上游 gh-pages 发布物」而不是「我们自己构建」吗？
    这会让我们依赖上游的发布节奏，但换来零 Node 构建依赖、不 fork 上游。
